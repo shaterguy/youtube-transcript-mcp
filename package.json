@@ -6,11 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "type-check": "tsc --noEmit",
-    "verify:deployment": "node scripts/verify-deployment.mjs"
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
     "mcp-handler": "^1.0.5",
     "next": "^15.2.6",
     "react": "^19.1.0",
