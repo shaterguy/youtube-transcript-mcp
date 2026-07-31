@@ -5,7 +5,7 @@ import {
 
 const YOUTUBE_URL_PATTERN = /(?<![A-Za-z0-9.-])(?:https?:\/\/)?(?:(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?(?:[^\s#]*?&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])/i;
 const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
-const DEFUDDLE_TIMEOUT_MS = 12_000;
+const DEFUDDLE_TIMEOUT_MS = 2_000;
 
 export type TranscriptSource = "defuddle" | "gemini";
 
@@ -80,7 +80,7 @@ async function fetchFromDefuddle(
     }
     if (error instanceof Error && error.name === "AbortError") {
       throw new TranscriptError(
-        "The public-caption provider timed out after 12 seconds."
+        "The public-caption provider timed out after 2 seconds."
       );
     }
     throw new TranscriptError(
