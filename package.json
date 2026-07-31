@@ -1,14 +1,16 @@
 {
   "name": "youtube-transcript-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "verify:deployment": "node scripts/verify-deployment.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "mcp-handler": "^1.0.5",
     "next": "^15.2.6",
     "react": "^19.1.0",
