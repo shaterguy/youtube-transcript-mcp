@@ -39,7 +39,7 @@ const handler = createMcpHandler(
       {
         title: "Get or transcribe YouTube video",
         description:
-          "Use this when the user provides a public YouTube video URL or video ID and wants a transcript, captions, or timestamped script. The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
+          "Use this when the user provides a public YouTube video URL or video ID and wants a transcript, captions, or timestamped script. The complete transcript is returned in the structured output field named transcript. The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
         inputSchema: {
           url: z
             .string()
@@ -58,6 +58,9 @@ const handler = createMcpHandler(
           canonicalUrl: z.string().url(),
           source: z.enum(["defuddle", "gemini"]),
           characterCount: z.number().int().nonnegative(),
+          lineCount: z.number().int().nonnegative(),
+          first30Lines: z.array(z.string()).max(30),
+          transcript: z.string(),
         },
         annotations: {
           readOnlyHint: true,
@@ -69,30 +72,23 @@ const handler = createMcpHandler(
       async ({ url, language }) => {
         try {
           const result = await fetchYouTubeTranscript(url, language ?? "ko-KR");
-          const characterCount = result.transcript.length;
-          const sourceLabel =
-            result.source === "defuddle"
-              ? "existing public captions via Defuddle"
-              : "direct video transcription via Gemini 3.5 Flash-Lite";
+          const transcriptLines = result.transcript.split("\n");
+          const structuredResult = {
+            videoId: result.videoId,
+            canonicalUrl: result.canonicalUrl,
+            source: result.source,
+            characterCount: result.transcript.length,
+            lineCount: transcriptLines.length,
+            first30Lines: transcriptLines.slice(0, 30),
+            transcript: result.transcript,
+          };
 
           return {
-            structuredContent: {
-              videoId: result.videoId,
-              canonicalUrl: result.canonicalUrl,
-              source: result.source,
-              characterCount,
-            },
+            structuredContent: structuredResult,
             content: [
               {
                 type: "text",
-                text: [
-                  `Video ID: ${result.videoId}`,
-                  `Video URL: ${result.canonicalUrl}`,
-                  `Transcript source: ${sourceLabel}`,
-                  `Character count: ${characterCount}`,
-                  "",
-                  result.transcript,
-                ].join("\n"),
+                text: JSON.stringify(structuredResult, null, 2),
               },
             ],
           };
