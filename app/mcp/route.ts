@@ -1,7 +1,11 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { isGeminiConfigured } from "../../lib/gemini";
-import { fetchYouTubeTranscript, TranscriptError } from "../../lib/youtube";
+import {
+  getCachedYouTubeTranscript,
+  TRANSCRIPT_CACHE_VERSION,
+} from "../../lib/transcript-cache";
+import { TranscriptError } from "../../lib/youtube";
 
 export const maxDuration = 300;
 
@@ -12,7 +16,7 @@ const handler = createMcpHandler(
       {
         title: "Check MCP connection",
         description:
-          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback is configured.",
+          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback and transcript cache are configured.",
         inputSchema: z.object({}),
         annotations: {
           readOnlyHint: true,
@@ -28,6 +32,7 @@ const handler = createMcpHandler(
             text: [
               "YouTube Transcript MCP connection is working.",
               `Gemini fallback configured: ${isGeminiConfigured() ? "yes" : "no"}.`,
+              `Transcript cache configured: yes (${TRANSCRIPT_CACHE_VERSION}).`,
             ].join("\n"),
           },
         ],
@@ -39,7 +44,7 @@ const handler = createMcpHandler(
       {
         title: "Get or transcribe YouTube video",
         description:
-          "Use this when the user provides a public YouTube video URL or video ID and wants a transcript, captions, or timestamped script. The complete transcript is returned in the structured output field named transcript. The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
+          "Use this when the user provides a public YouTube video URL or video ID and wants a transcript, captions, or timestamped script. The complete transcript is returned in the structured output field named transcript. Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again. The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
         inputSchema: {
           url: z
             .string()
@@ -61,6 +66,9 @@ const handler = createMcpHandler(
           lineCount: z.number().int().nonnegative(),
           first30Lines: z.array(z.string()).max(30),
           transcript: z.string(),
+          cacheProvider: z.literal("vercel-data-cache"),
+          cacheVersion: z.string(),
+          cacheCreatedAt: z.string().datetime(),
         },
         annotations: {
           readOnlyHint: true,
@@ -71,7 +79,7 @@ const handler = createMcpHandler(
       },
       async ({ url, language }) => {
         try {
-          const result = await fetchYouTubeTranscript(url, language ?? "ko-KR");
+          const result = await getCachedYouTubeTranscript(url, language);
           const transcriptLines = result.transcript.split("\n");
           const structuredResult = {
             videoId: result.videoId,
@@ -81,6 +89,9 @@ const handler = createMcpHandler(
             lineCount: transcriptLines.length,
             first30Lines: transcriptLines.slice(0, 30),
             transcript: result.transcript,
+            cacheProvider: result.cacheProvider,
+            cacheVersion: result.cacheVersion,
+            cacheCreatedAt: result.cacheCreatedAt,
           };
 
           return {
