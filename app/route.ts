@@ -1,6 +1,6 @@
 export async function GET() {
   return new Response(
-    "YouTube Transcript MCP v0.2.0 is running with get_youtube_transcript.",
+    "YouTube Transcript MCP v0.3.0 is running with Gemini fallback.",
     {
       status: 200,
       headers: {
