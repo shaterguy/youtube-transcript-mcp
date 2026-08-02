@@ -1,0 +1,117 @@
+name: Actions artifact maintenance
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/artifact-maintenance.yml"
+  schedule:
+    - cron: "23 18 * * *"
+  workflow_dispatch:
+    inputs:
+      delete_all:
+        description: Delete every current Actions artifact
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: actions-artifact-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set repository retention to 7 days when permitted
+        id: retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api --method PUT \
+            "repos/$GITHUB_REPOSITORY/actions/permissions/artifact-and-log-retention" \
+            -F days=7 >/dev/null 2>&1; then
+            echo "status=applied" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fallback-scheduled-cleanup" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Delete Actions artifacts
+        id: cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff_epoch="$(date -u -d '7 days ago' +%s)"
+          delete_all=false
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            delete_all=true
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${{ inputs.delete_all }}" == "true" ]]; then
+            delete_all=true
+          fi
+
+          deleted=0
+          while IFS=$'\t' read -r artifact_id created_at; do
+            [[ -z "${artifact_id:-}" ]] && continue
+            created_epoch="$(date -u -d "$created_at" +%s)"
+            if [[ "$delete_all" == "true" || "$created_epoch" -lt "$cutoff_epoch" ]]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null
+              deleted=$((deleted + 1))
+            fi
+          done < <(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | [.id, .created_at] | @tsv'
+          )
+
+          remaining="$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              --jq '.artifacts | length' \
+              | awk '{ total += $1 } END { print total + 0 }'
+          )"
+          echo "deleted=$deleted" >> "$GITHUB_OUTPUT"
+          echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
+          echo "delete_all=$delete_all" >> "$GITHUB_OUTPUT"
+
+      - name: Record verified result
+        shell: bash
+        env:
+          RETENTION_STATUS: ${{ steps.retention.outputs.status }}
+          DELETED: ${{ steps.cleanup.outputs.deleted }}
+          REMAINING: ${{ steps.cleanup.outputs.remaining }}
+          DELETE_ALL: ${{ steps.cleanup.outputs.delete_all }}
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          cat > .github/artifact-maintenance-report.json <<EOF
+          {
+            "repository": "$GITHUB_REPOSITORY",
+            "run_id": "$GITHUB_RUN_ID",
+            "event": "$GITHUB_EVENT_NAME",
+            "delete_all": $DELETE_ALL,
+            "deleted_artifacts": $DELETED,
+            "remaining_artifacts": $REMAINING,
+            "retention_days": 7,
+            "retention_setting": "$RETENTION_STATUS",
+            "completed_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/artifact-maintenance-report.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Record Actions artifact maintenance result"
+            git push
+          fi
