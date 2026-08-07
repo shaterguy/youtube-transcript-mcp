@@ -7,6 +7,7 @@ import {
 } from "../../lib/transcript-cache";
 import { TranscriptError } from "../../lib/youtube";
 import {
+  YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
   YOUTUBE_RESPONSE_CONTRACT,
   YOUTUBE_RESPONSE_POLICY_VERSION,
   YOUTUBE_SERVER_INSTRUCTIONS,
@@ -125,6 +126,7 @@ const handler = createMcpHandler(
         description: [
           YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
           "The complete transcript is returned in the structured output field named transcript.",
+          "The final-response directive and response contract are returned before the transcript so the host model sees the composition rules before the long source text.",
           "Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again.",
           "The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
         ].join(" "),
@@ -142,6 +144,9 @@ const handler = createMcpHandler(
             .describe("Preferred language tag for the public-caption provider, such as ko-KR or en-US."),
         },
         outputSchema: {
+          responsePolicyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
+          responseDirective: z.literal(YOUTUBE_FINAL_RESPONSE_DIRECTIVE),
+          responseContract: responseContractSchema,
           videoId: z.string(),
           canonicalUrl: z.string().url(),
           source: z.enum(["defuddle", "gemini"]),
@@ -149,8 +154,6 @@ const handler = createMcpHandler(
           lineCount: z.number().int().nonnegative(),
           first30Lines: z.array(z.string()).max(30),
           transcript: z.string(),
-          responsePolicyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
-          responseContract: responseContractSchema,
           cacheProvider: z.literal("vercel-data-cache"),
           cacheVersion: z.string(),
           cacheCreatedAt: z.string().datetime(),
@@ -167,6 +170,9 @@ const handler = createMcpHandler(
           const result = await getCachedYouTubeTranscript(url, language);
           const transcriptLines = result.transcript.split("\n");
           const structuredResult = {
+            responsePolicyVersion: YOUTUBE_RESPONSE_POLICY_VERSION,
+            responseDirective: YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
+            responseContract: YOUTUBE_RESPONSE_CONTRACT,
             videoId: result.videoId,
             canonicalUrl: result.canonicalUrl,
             source: result.source,
@@ -174,8 +180,6 @@ const handler = createMcpHandler(
             lineCount: transcriptLines.length,
             first30Lines: transcriptLines.slice(0, 30),
             transcript: result.transcript,
-            responsePolicyVersion: YOUTUBE_RESPONSE_POLICY_VERSION,
-            responseContract: YOUTUBE_RESPONSE_CONTRACT,
             cacheProvider: result.cacheProvider,
             cacheVersion: result.cacheVersion,
             cacheCreatedAt: result.cacheCreatedAt,
