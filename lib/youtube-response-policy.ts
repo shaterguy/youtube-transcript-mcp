@@ -1,7 +1,10 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.1" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
   "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. This is the single transcript-acquisition path for YouTube: do not pre-call, supplement, or replace it with yt-dlp, metadata scrapers, or other transcript tools. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
+
+export const YOUTUBE_FINAL_RESPONSE_DIRECTIVE =
+  "FINAL RESPONSE RULE: Assimilate the transcript into standalone report prose; do not retell what the speaker/video said, explained, claimed, mentioned, or discussed. Write the substantive propositions directly. Every YouTube timestamp must be a clickable Markdown link placed only AFTER the completed sentence or paragraph it supports, never before the content, in a heading, or on a standalone line. The MCP supplies transcript and rules only; the host LLM writes the actual report." as const;
 
 export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규칙 (${YOUTUBE_RESPONSE_POLICY_VERSION})
 
