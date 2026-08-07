@@ -1,4 +1,4 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.1" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
   "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. This is the single transcript-acquisition path for YouTube: do not pre-call, supplement, or replace it with yt-dlp, metadata scrapers, or other transcript tools. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
@@ -14,6 +14,7 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 - 사용자가 원문 자막·캡션 자체만 명시적으로 요청한 경우에는 자막을 그대로 제공하는 요청을 따른다.
 - 그 외에는 반환된 transcript를 원문으로 삼아 콘텐츠를 정리·분석한다.
 - 명백한 오타와 전사 오류는 자연스럽게 바로잡되 별도로 언급하지 않는다.
+- MCP는 자막과 응답 구성 규칙만 제공한다. [개요], [내용정리], [사실검증], [추가분석]의 실제 문장과 분석 내용은 MCP가 미리 생성하지 않으며, transcript를 받은 호스트 LLM이 작성한다.
 
 3. 출력 구조
 - 기본 대제목은 [개요], [내용정리], 필요한 경우 [사실검증], [추가분석] 순서로 구성한다.
@@ -24,8 +25,10 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 
 4. 타임스탬프
 - 영상 콘텐츠를 정리할 때 주요 문장 또는 의미 단위 끝에 실제 발언 위치와 대응하는 클릭 가능한 YouTube 타임스탬프를 붙인다.
+- '클릭 가능한 타임스탬프'는 단순한 12:34 또는 [12:34] 텍스트가 아니라 반드시 Markdown 링크 자체여야 한다. 형식은 [MM:SS](<canonicalUrl>&t=<seconds>s) 또는 1시간 이상 영상에서는 [HH:MM:SS](<canonicalUrl>&t=<seconds>s)로 출력한다.
+- 예: [12:34](https://www.youtube.com/watch?v=VIDEO_ID&t=754s). 타임스탬프 링크를 코드 블록이나 인라인 코드로 감싸지 않는다.
 - transcript에 존재하거나 그 transcript로부터 신뢰성 있게 대응시킬 수 있는 실제 시각만 사용한다. 타임스탬프를 추정하거나 만들어내지 않는다.
-- 링크는 가능한 경우 canonicalUrl에 &t=<seconds>s 형식으로 생성한다.
+- 표시 텍스트만 있는 타임스탬프, URL이 없는 타임스탬프, 일반 텍스트 URL 뒤에 별도 시각을 적는 방식은 이 규칙을 충족하지 않는다.
 
 5. 충돌 처리
 - 사용자가 이번 요청에서 더 구체적인 출력 형식이나 범위를 명시하면 그 요청을 우선한다.
@@ -39,6 +42,11 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
     exclusivePath: true,
     otherTranscriptToolsAllowed: false,
     externalResearchAfterTranscriptAllowed: true,
+  },
+  contentGeneration: {
+    performedByMcp: false,
+    performedByHostLlm: true,
+    mcpProvidesTranscriptAndResponseRulesOnly: true,
   },
   defaultMode: "organized-analysis",
   rawTranscriptOnlyWhenExplicitlyRequested: true,
@@ -70,9 +78,12 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
   },
   timestamps: {
     clickable: true,
+    markdownLinkRequired: true,
+    rejectPlainTextTimestamp: true,
     attachToMajorMeaningUnits: true,
     useActualSpeechPositionsOnly: true,
     neverInvent: true,
-    preferredLinkFormat: "<canonicalUrl>&t=<seconds>s",
+    displayTextFormat: "MM:SS or HH:MM:SS",
+    markdownLinkTemplate: "[<displayTimestamp>](<canonicalUrl>&t=<seconds>s)",
   },
 } as const;
