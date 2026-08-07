@@ -6,8 +6,60 @@ import {
   TRANSCRIPT_CACHE_VERSION,
 } from "../../lib/transcript-cache";
 import { TranscriptError } from "../../lib/youtube";
+import {
+  YOUTUBE_RESPONSE_CONTRACT,
+  YOUTUBE_RESPONSE_POLICY_VERSION,
+  YOUTUBE_SERVER_INSTRUCTIONS,
+  YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
+} from "../../lib/youtube-response-policy";
 
 export const maxDuration = 300;
+
+const responseContractSchema = z.object({
+  policyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
+  scope: z.literal("youtube-content-only"),
+  transcriptAcquisition: z.object({
+    tool: z.literal("get_youtube_transcript"),
+    exclusivePath: z.literal(true),
+    otherTranscriptToolsAllowed: z.literal(false),
+    externalResearchAfterTranscriptAllowed: z.literal(true),
+  }),
+  defaultMode: z.literal("organized-analysis"),
+  rawTranscriptOnlyWhenExplicitlyRequested: z.literal(true),
+  transcriptCleanup: z.object({
+    silentlyCorrectObviousTyposAndTranscriptionErrors: z.literal(true),
+  }),
+  sections: z.object({
+    overview: z.object({
+      label: z.literal("[개요]"),
+      required: z.literal(true),
+      rule: z.string(),
+    }),
+    content: z.object({
+      label: z.literal("[내용정리]"),
+      required: z.literal(true),
+      rule: z.string(),
+    }),
+    factCheck: z.object({
+      label: z.literal("[사실검증]"),
+      required: z.literal(false),
+      omitWhenNoMaterialError: z.literal(true),
+      rule: z.string(),
+    }),
+    additionalAnalysis: z.object({
+      label: z.literal("[추가분석]"),
+      required: z.literal(true),
+      rule: z.string(),
+    }),
+  }),
+  timestamps: z.object({
+    clickable: z.literal(true),
+    attachToMajorMeaningUnits: z.literal(true),
+    useActualSpeechPositionsOnly: z.literal(true),
+    neverInvent: z.literal(true),
+    preferredLinkFormat: z.literal("<canonicalUrl>&t=<seconds>s"),
+  }),
+});
 
 const handler = createMcpHandler(
   async (server) => {
@@ -16,7 +68,7 @@ const handler = createMcpHandler(
       {
         title: "Check MCP connection",
         description:
-          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback and transcript cache are configured.",
+          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback, transcript cache, and YouTube response policy are configured.",
         inputSchema: z.object({}),
         annotations: {
           readOnlyHint: true,
@@ -33,6 +85,7 @@ const handler = createMcpHandler(
               "YouTube Transcript MCP connection is working.",
               `Gemini fallback configured: ${isGeminiConfigured() ? "yes" : "no"}.`,
               `Transcript cache configured: yes (${TRANSCRIPT_CACHE_VERSION}).`,
+              `YouTube response policy configured: yes (${YOUTUBE_RESPONSE_POLICY_VERSION}).`,
             ].join("\n"),
           },
         ],
@@ -43,8 +96,12 @@ const handler = createMcpHandler(
       "get_youtube_transcript",
       {
         title: "Get or transcribe YouTube video",
-        description:
-          "Use this when the user provides a public YouTube video URL or video ID and wants a transcript, captions, or timestamped script. The complete transcript is returned in the structured output field named transcript. Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again. The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
+        description: [
+          YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
+          "The complete transcript is returned in the structured output field named transcript.",
+          "Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again.",
+          "The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
+        ].join(" "),
         inputSchema: {
           url: z
             .string()
@@ -66,6 +123,8 @@ const handler = createMcpHandler(
           lineCount: z.number().int().nonnegative(),
           first30Lines: z.array(z.string()).max(30),
           transcript: z.string(),
+          responsePolicyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
+          responseContract: responseContractSchema,
           cacheProvider: z.literal("vercel-data-cache"),
           cacheVersion: z.string(),
           cacheCreatedAt: z.string().datetime(),
@@ -89,6 +148,8 @@ const handler = createMcpHandler(
             lineCount: transcriptLines.length,
             first30Lines: transcriptLines.slice(0, 30),
             transcript: result.transcript,
+            responsePolicyVersion: YOUTUBE_RESPONSE_POLICY_VERSION,
+            responseContract: YOUTUBE_RESPONSE_CONTRACT,
             cacheProvider: result.cacheProvider,
             cacheVersion: result.cacheVersion,
             cacheCreatedAt: result.cacheCreatedAt,
@@ -124,7 +185,9 @@ const handler = createMcpHandler(
       }
     );
   },
-  {},
+  {
+    instructions: YOUTUBE_SERVER_INSTRUCTIONS,
+  },
   {
     basePath: "",
     verboseLogs: true,
