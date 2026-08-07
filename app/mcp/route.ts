@@ -29,6 +29,16 @@ const responseContractSchema = z.object({
     performedByHostLlm: z.literal(true),
     mcpProvidesTranscriptAndResponseRulesOnly: z.literal(true),
   }),
+  composition: z.object({
+    mode: z.literal("source-assimilated-report"),
+    reportStyleRequired: z.literal(true),
+    transcriptRetellingForbidden: z.literal(true),
+    attributionNarrationForbidden: z.literal(true),
+    sourceViewpointPreservedWithoutAttributionFrame: z.literal(true),
+    rule: z.string(),
+    negativeExamples: z.array(z.string()),
+    positiveExamples: z.array(z.string()),
+  }),
   defaultMode: z.literal("organized-analysis"),
   rawTranscriptOnlyWhenExplicitlyRequested: z.literal(true),
   transcriptCleanup: z.object({
@@ -61,12 +71,18 @@ const responseContractSchema = z.object({
     clickable: z.literal(true),
     markdownLinkRequired: z.literal(true),
     rejectPlainTextTimestamp: z.literal(true),
+    placement: z.literal("end-of-content-unit"),
+    prefixPlacementForbidden: z.literal(true),
+    standalonePlacementForbidden: z.literal(true),
+    headingPlacementForbidden: z.literal(true),
+    afterTerminalPunctuation: z.literal(true),
     attachToMajorMeaningUnits: z.literal(true),
+    oneRepresentativeTimestampPerMeaningUnitPreferred: z.literal(true),
     useActualSpeechPositionsOnly: z.literal(true),
     neverInvent: z.literal(true),
     displayTextFormat: z.literal("MM:SS or HH:MM:SS"),
     markdownLinkTemplate: z.literal(
-      "[<displayTimestamp>](<canonicalUrl>&t=<seconds>s)"
+      "<content sentence or paragraph>. [<displayTimestamp>](<canonicalUrl>&t=<seconds>s)"
     ),
   }),
 });
