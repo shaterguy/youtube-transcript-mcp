@@ -24,6 +24,11 @@ const responseContractSchema = z.object({
     otherTranscriptToolsAllowed: z.literal(false),
     externalResearchAfterTranscriptAllowed: z.literal(true),
   }),
+  contentGeneration: z.object({
+    performedByMcp: z.literal(false),
+    performedByHostLlm: z.literal(true),
+    mcpProvidesTranscriptAndResponseRulesOnly: z.literal(true),
+  }),
   defaultMode: z.literal("organized-analysis"),
   rawTranscriptOnlyWhenExplicitlyRequested: z.literal(true),
   transcriptCleanup: z.object({
@@ -54,10 +59,15 @@ const responseContractSchema = z.object({
   }),
   timestamps: z.object({
     clickable: z.literal(true),
+    markdownLinkRequired: z.literal(true),
+    rejectPlainTextTimestamp: z.literal(true),
     attachToMajorMeaningUnits: z.literal(true),
     useActualSpeechPositionsOnly: z.literal(true),
     neverInvent: z.literal(true),
-    preferredLinkFormat: z.literal("<canonicalUrl>&t=<seconds>s"),
+    displayTextFormat: z.literal("MM:SS or HH:MM:SS"),
+    markdownLinkTemplate: z.literal(
+      "[<displayTimestamp>](<canonicalUrl>&t=<seconds>s)"
+    ),
   }),
 });
 
