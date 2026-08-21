@@ -1,11 +1,11 @@
 {
   "repository": "shaterguy/youtube-transcript-mcp",
-  "run_id": "32406559141",
+  "run_id": "32516132764",
   "event": "schedule",
   "delete_all": false,
   "deleted_artifacts": 0,
   "remaining_artifacts": 0,
   "retention_days": 7,
   "retention_setting": "fallback-scheduled-cleanup",
-  "completed_at_utc": "2026-08-20T19:03:16Z"
+  "completed_at_utc": "2026-08-21T18:59:23Z"
 }
