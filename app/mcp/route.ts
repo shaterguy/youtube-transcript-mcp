@@ -226,4 +226,37 @@ const handler = createMcpHandler(
   }
 );
 
-export { handler as GET, handler as POST, handler as DELETE };
+const instrumentedHandler = async (request: Request) => {
+  let bodyMethod: string | null = null;
+  try {
+    const raw = await request.clone().text();
+    if (raw) {
+      const parsed = JSON.parse(raw) as { method?: unknown };
+      bodyMethod = typeof parsed?.method === "string" ? parsed.method : null;
+    }
+  } catch {
+    bodyMethod = null;
+  }
+
+  console.log(
+    "MCP_DIAG",
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      httpMethod: request.method,
+      protocolVersion: request.headers.get("mcp-protocol-version"),
+      mcpMethod: request.headers.get("mcp-method"),
+      mcpName: request.headers.get("mcp-name"),
+      hasSessionId: Boolean(request.headers.get("mcp-session-id")),
+      accept: request.headers.get("accept"),
+      bodyMethod,
+    })
+  );
+
+  return handler(request);
+};
+
+export {
+  instrumentedHandler as GET,
+  instrumentedHandler as POST,
+  instrumentedHandler as DELETE,
+};
