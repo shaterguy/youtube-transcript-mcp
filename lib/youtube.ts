@@ -7,6 +7,46 @@ const YOUTUBE_URL_PATTERN = /(?<![A-Za-z0-9.-])(?:https?:\/\/)?(?:(?:www\.|m\.|m
 const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 const DEFUDDLE_TIMEOUT_MS = 2_000;
 
+function extractUsableTranscriptBody(transcript: string): string {
+  const lines = transcript.replace(/\r\n/g, "\n").split("\n");
+  let startIndex = 0;
+
+  if (lines[0]?.trim() === "---") {
+    const frontMatterEnd = lines.findIndex(
+      (line, index) => index > 0 && line.trim() === "---"
+    );
+    if (frontMatterEnd >= 0) {
+      startIndex = frontMatterEnd + 1;
+    }
+  }
+
+  return lines
+    .slice(startIndex)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        line !== "---" &&
+        !/^(?:title|site|source|domain):\s*/i.test(line) &&
+        !/^!\[[^\]]*\]\([^)]*\)$/.test(line) &&
+        !/^https?:\/\/\S+$/.test(line)
+    )
+    .join("\n")
+    .trim();
+}
+
+export function isUsablePublicTranscript(transcript: string): boolean {
+  return Boolean(extractUsableTranscriptBody(transcript));
+}
+
+function assertUsablePublicTranscript(transcript: string): void {
+  if (!isUsablePublicTranscript(transcript)) {
+    throw new TranscriptError(
+      "The public-caption provider returned metadata but no transcript text."
+    );
+  }
+}
+
 export type TranscriptSource = "defuddle" | "gemini";
 
 export type TranscriptResult = {
@@ -73,6 +113,7 @@ async function fetchFromDefuddle(
         "The public-caption provider returned an empty transcript."
       );
     }
+    assertUsablePublicTranscript(transcript);
     return transcript;
   } catch (error) {
     if (error instanceof TranscriptError) {
