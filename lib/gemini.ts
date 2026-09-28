@@ -1,10 +1,10 @@
 const GEMINI_MODELS = [
-  { id: "gemini-3.8-flash", thinkingLevel: "low" },
-  { id: "gemini-3.7-flash", thinkingLevel: "low" },
-  { id: "gemini-3.5-flash-lite", thinkingLevel: "minimal" },
+  { id: "gemini-3.8-flash", thinkingLevel: "low", timeoutMs: 130_000 },
+  { id: "gemini-3.7-flash", thinkingLevel: "low", timeoutMs: 90_000 },
+  { id: "gemini-3.5-flash-lite", thinkingLevel: "minimal", timeoutMs: 60_000 },
 ] as const;
 
-const GEMINI_TIMEOUT_MS = 275_000;
+const GEMINI_TIMEOUT_MS = 290_000;
 
 const TRANSCRIPTION_PROMPT = `당신은 영상 전용 정밀 전사 엔진이다. 이 공개 YouTube 영상의 음성을 직접 듣고 처음 들리는 발화부터 마지막 발화까지 전부 전사하라.
 
@@ -77,8 +77,9 @@ export async function transcribeYouTubeWithGemini(
       break;
     }
 
+    const attemptTimeoutMs = Math.min(model.timeoutMs, remainingMs);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), remainingMs);
+    const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
     const endpoint =
       `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent`;
 
@@ -184,8 +185,11 @@ export async function transcribeYouTubeWithGemini(
       return transcript;
     } catch (error) {
       const timedOut = error instanceof Error && error.name === "AbortError";
+      const hitSharedDeadline = timedOut && attemptTimeoutMs >= remainingMs;
       const detail = timedOut
-        ? "request timed out before the shared 275-second Gemini deadline"
+        ? hitSharedDeadline
+          ? "request timed out before the shared 290-second Gemini deadline"
+          : `request timed out after ${Math.round(attemptTimeoutMs / 1000)}-second ${model.id} attempt deadline`
         : error instanceof Error
           ? error.message
           : "unknown error";
@@ -217,6 +221,6 @@ export async function transcribeYouTubeWithGemini(
   throw new GeminiTranscriptError(
     detail
       ? `Gemini transcription failed across fallback chain. ${detail}`
-      : "Gemini transcription failed because the shared 275-second deadline expired before a model completed."
+      : "Gemini transcription failed because the shared 290-second deadline expired before a model completed."
   );
 }
