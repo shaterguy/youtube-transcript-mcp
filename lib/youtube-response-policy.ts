@@ -1,4 +1,4 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.1" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.2" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
   "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. This is the single transcript-acquisition path for YouTube: do not pre-call, supplement, or replace it with yt-dlp, metadata scrapers, or other transcript tools. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
@@ -32,7 +32,10 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 - [개요]는 주제, 영상 길이처럼 확인 가능한 기본 정보, 관련 인물 등 개괄 정보만 제공한다. 핵심결론·핵심내용·한눈에 보기 등의 선요약을 두지 않는다.
 - [내용정리]에서는 반복되거나 흩어진 발언을 의미 단위로 통합하고, 발언 순서에 얽매이지 말고 주제와 논리 흐름에 맞게 재배열한다. 외부 자료·평가·반박·사실검증·확장 해석을 섞지 않는다.
 - [사실검증]에서는 원문의 명백하고 실질적인 오류만 바로잡는다. 사소한 표현 차이나 대략적인 방향이 맞는 내용은 넣지 않는다. 명백한 오류가 없으면 이 섹션을 생략한다.
-- [추가분석]에서는 주제의 맥락, 배경, 심화 내용, 이해에 도움이 되는 추가 지식과 인사이트를 제시한다. 원문 정리와 외부 분석을 명확히 분리한다.
+- [추가분석]은 [내용정리]와 [사실검증]까지 영상 내용 전달이 끝난 뒤, 영상에 없던 정보를 추가하여 사용자의 인사이트를 확장하는 별도 섹션이다.
+- [추가분석]에서는 이미 전달한 영상 내용을 다시 요약·정리·평가·채점·비평하지 않는다. 영상의 구성이나 주장 자체를 재평가하는 것도 이 섹션의 목적이 아니다.
+- 대신 영상에 없던 관련 배경지식, 인접 개념, 비교 사례, 최신 연구·데이터, 파급효과, 새로운 연결관계, 추가로 생각해 볼 쟁점과 질문 등 실질적으로 새로운 정보를 제시한다.
+- 외부 자료를 활용할 수 있으며, [내용정리]의 반복이 아니라 원문 바깥으로 주제를 확장하는 데 사용한다.
 
 5. 타임스탬프
 - 영상 콘텐츠를 정리할 때 주요 문장 또는 의미 단위에 실제 발언 위치와 대응하는 클릭 가능한 YouTube 타임스탬프를 붙인다.
@@ -106,7 +109,7 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
     additionalAnalysis: {
       label: "[추가분석]",
       required: true,
-      rule: "Add broader context, background, deeper analysis, and useful related knowledge while keeping it separate from the source-content reconstruction.",
+      rule: "Provide genuinely additive information that is not already contained in the transcript or source-content reconstruction. Use this section to broaden the user's insight with relevant external context, adjacent concepts, comparative cases, current research or data, implications, new connections, and further questions worth considering. Do not evaluate, grade, critique, re-summarize, or repeat the video's content; the source-content reconstruction is complete before this section.",
     },
   },
   timestamps: {
