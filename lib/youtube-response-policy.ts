@@ -1,4 +1,4 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.2" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.3" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
   "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. This is the single transcript-acquisition path for YouTube: do not pre-call, supplement, or replace it with yt-dlp, metadata scrapers, or other transcript tools. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
@@ -33,7 +33,7 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 - [내용정리]에서는 반복되거나 흩어진 발언을 의미 단위로 통합하고, 발언 순서에 얽매이지 말고 주제와 논리 흐름에 맞게 재배열한다. 외부 자료·평가·반박·사실검증·확장 해석을 섞지 않는다.
 - [사실검증]에서는 원문의 명백하고 실질적인 오류만 바로잡는다. 사소한 표현 차이나 대략적인 방향이 맞는 내용은 넣지 않는다. 명백한 오류가 없으면 이 섹션을 생략한다.
 - [추가분석]은 [내용정리]와 [사실검증]까지 영상 내용 전달이 끝난 뒤, 영상에 없던 정보를 추가하여 사용자의 인사이트를 확장하는 별도 섹션이다.
-- [추가분석]에서는 이미 전달한 영상 내용을 다시 요약·정리·평가·채점·비평하지 않는다. 영상의 구성이나 주장 자체를 재평가하는 것도 이 섹션의 목적이 아니다.
+- [추가분석]에서는 이미 전달한 영상 내용을 다시 요약·정리하지 않으며, 원본 영상 자체에 대한 평가·리뷰·비평·감상·채점·품질판정을 하지 않는다. 영상의 구성·완성도·전달력 등 콘텐츠 자체를 평하는 내용도 금지한다. 다만 영상 속 개별 주장·사실을 외부 근거와 대조하는 사실검증과 배경 분석은 이 금지에 포함하지 않는다.
 - 대신 영상에 없던 관련 배경지식, 인접 개념, 비교 사례, 최신 연구·데이터, 파급효과, 새로운 연결관계, 추가로 생각해 볼 쟁점과 질문 등 실질적으로 새로운 정보를 제시한다.
 - 외부 자료를 활용할 수 있으며, [내용정리]의 반복이 아니라 원문 바깥으로 주제를 확장하는 데 사용한다.
 
@@ -109,7 +109,7 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
     additionalAnalysis: {
       label: "[추가분석]",
       required: true,
-      rule: "Provide genuinely additive information that is not already contained in the transcript or source-content reconstruction. Use this section to broaden the user's insight with relevant external context, adjacent concepts, comparative cases, current research or data, implications, new connections, and further questions worth considering. Do not evaluate, grade, critique, re-summarize, or repeat the video's content; the source-content reconstruction is complete before this section.",
+      rule: "Provide genuinely additive information that is not already contained in the transcript or source-content reconstruction. Use this section to broaden the user's insight with relevant external context, adjacent concepts, comparative cases, current research or data, implications, new connections, and further questions worth considering. Do not evaluate, review, critique, rate, grade, or assess the quality of the original video itself, including its production quality, completeness, structure, or delivery, and do not re-summarize or repeat its content. Fact-checking individual claims against external evidence and adding contextual analysis remain allowed; the source-content reconstruction is complete before this section.",
     },
   },
   timestamps: {
