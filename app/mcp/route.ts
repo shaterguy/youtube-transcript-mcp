@@ -94,7 +94,7 @@ const asyncJobOutputSchema = z.object({
   jobToken: z.string(),
   videoId: z.string(),
   canonicalUrl: z.string(),
-  segmentation: z.enum(["clipped", "whole-video"]),
+  segmentation: z.enum(["file-clips", "prompt-scoped", "whole-video"]),
   durationSeconds: z.number().int().nullable(),
   completedSegments: z.number().int().nonnegative(),
   totalSegments: z.number().int().positive(),
@@ -148,11 +148,12 @@ const handler = createMcpHandler(
     server.registerTool(
       "start_youtube_transcript_job",
       {
-        title: "Start background Gemini transcription with verified time clips",
+        title: "Start resilient Gemini background transcription with explicit time scopes",
         description: [
           "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
-          "returns a signed jobToken immediately, and transcribes known-duration videos in overlapping",
-          "time clips with bounded concurrency and exponential 429/503/5xx retry.",
+          "returns a signed jobToken immediately and transcribes known-duration videos in overlapping time windows.",
+          "YouTube URL uses full-video background requests with time-scoped prompts, NOT physical video clipping.",
+          "Optional Gemini Files API URI enables actual clipped media windows. Supports 429/503/5xx retry.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
           "be verified, the full video is submitted asynchronously as one job (segmentation=whole-video).",
           "Always follow up by calling get_youtube_transcript_job with the latest returned jobToken",
@@ -163,6 +164,8 @@ const handler = createMcpHandler(
           language: z.string().min(2).max(35).optional(),
           durationSeconds: z.number().int().min(1).max(86400).optional(),
           chunkSeconds: z.number().int().min(60).max(900).optional(),
+          geminiFileUri: z.string().url().optional().describe("Optional Google Gemini Files API video URI for native physical clips."),
+          geminiMimeType: z.string().regex(/^video\/[a-z0-9.+-]+$/i).optional(),
         },
         outputSchema: asyncJobOutputSchema.shape,
         annotations: {
