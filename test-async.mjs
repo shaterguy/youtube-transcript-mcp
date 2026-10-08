@@ -59,6 +59,36 @@ assert.equal(queuedCheck.status,'in_progress');
 assert.equal(queuedCheck.segments[0].status,'in_progress');
 assert.equal(queuedCheck.segments[0].modelIndex,0);
 
+// INTERNAL is a transient provider failure, even when nested in an errors array.
+queue=[reply({id:'v1_internal1',status:'in_progress'})];
+const internal=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+queue=[
+  reply({status:'failed', errors:[{code:'INTERNAL',message:'There was a problem processing your request. You will not be charged.'}]}),
+  reply({id:'v1_internal2',status:'in_progress'})
+];
+const recoveredInternal=await getGeminiTranscriptionJob(internal.jobToken);
+assert.equal(recoveredInternal.status,'in_progress');
+assert.equal(recoveredInternal.segments[0].modelIndex,1);
+assert.notEqual(recoveredInternal.jobToken,internal.jobToken);
+
+// A Free Tier GET 429 must not hammer the provider with immediate retries.
+queue=[reply({id:'v1_rate1',status:'in_progress'})];
+const throttled=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+const nBeforeRateGet=calls.length;
+queue=[reply({error:{message:'Rate limit exceeded for model gemini-3.8-flash. Please retry in 27s'}},429)];
+const throttledPoll=await getGeminiTranscriptionJob(throttled.jobToken);
+assert.equal(throttledPoll.status,'in_progress');
+assert.equal(throttledPoll.segments[0].modelIndex,0);
+assert.equal(calls.length,nBeforeRateGet+1);
+
+// A POST 429 may be retried, honoring provider retry guidance.
+queue=[
+ reply({error:{message:'Rate limit exceeded. Please retry in 0s'}},429),
+ reply({id:'v1_post429_recovered',status:'in_progress'})
+];
+const recoveredPost429=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+assert.equal(recoveredPost429.status,'in_progress');
+
 // Files API URI uses native physical clip offsets instead of YouTube prompt scoping.
 queue=[reply({id:'v1_gemfile',status:'in_progress'})];
 const fileJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60,
@@ -67,4 +97,4 @@ assert.equal(fileJob.segmentation,'file-clips');
 assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
