@@ -195,7 +195,7 @@ const handler = createMcpHandler(
           "Pass the most recently returned jobToken on every poll: retries change the signed token.",
           "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
         ].join(" "),
-        inputSchema: { jobToken: z.string().min(1).max(24000) },
+        inputSchema: { jobToken: z.string().min(1).max(128000) },
         outputSchema: asyncJobOutputSchema.shape,
         annotations: {
           readOnlyHint: false,

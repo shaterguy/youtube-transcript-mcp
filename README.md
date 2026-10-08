@@ -13,7 +13,7 @@ YouTube 공개 자막 추출 및 Gemini 전사 기능을 제공합니다. Termux
 
 1. `start_youtube_transcript_job({url:"https://youtu.be/G-8cDsHLrD0",durationSeconds:1200,chunkSeconds:240})`
 2. 반환된 최신 `jobToken`으로 `get_youtube_transcript_job({jobToken:"..."})` 호출
-3. 응답 `status`가 `in_progress`이면 이후 상태 조회 때 **새로 반환된 jobToken** 사용
+3. 응답 `status`가 `in_progress`이면 이후 상태 조회 때 **새로 반환된 jobToken** 사용 (완료된 구간의 결과는 토큰에 압축 저장돼 다시 조회하지 않음)
 4. `completed`일 때만 `transcript`가 존재하고, 구간 전체 병합 결과를 사용합니다. `failed`는 전사 완료로 취급하지 않습니다.
 
 `durationSeconds`는 선택사항입니다. 미입력 시 YouTube Data API(환경변수 `YOUTUBE_DATA_API_KEY`) 또는 YouTube 플레이어 메타데이터에서 길이를 확인합니다. 정확한 영상 길이를 확인하지 못할 경우 **영상 전체를 비동기 처리하되 구간 분할은 수행하지 않습니다**(`segmentation:"whole-video"`). 구간 분할 보장이 필요하면 실제 영상 길이를 인자로 전달하십시오.

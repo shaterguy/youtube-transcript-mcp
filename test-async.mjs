@@ -32,6 +32,41 @@ assert.equal(completed.transcript.split('\n').length,3);
 assert.equal(completed.first30Lines.length,3);
 let invalid=false;try{await getGeminiTranscriptionJob(started.jobToken.slice(0,-2)+'xx')}catch(e){invalid=/signature/.test(e.message)}assert.ok(invalid);
 
+// Cache partial completed clips in the signed token so GET rate limits cannot
+// prevent a video with more than five clips from ever fully assembling.
+queue=[
+  reply({id:'v1_keep1',status:'in_progress'}),
+  reply({id:'v1_keep2',status:'in_progress'}),
+  reply({id:'v1_keep3',status:'in_progress'})
+];
+const multi=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:180,chunkSeconds:60});
+assert.equal(multi.totalSegments,3);
+queue=[
+  reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:00:01] 화자: 첫 구간'}]}]}),
+  reply({status:'in_progress'}),
+  reply({status:'in_progress'})
+];
+const partial=await getGeminiTranscriptionJob(multi.jobToken);
+assert.equal(partial.status,'in_progress');
+assert.equal(partial.completedSegments,1);
+const readsBeforeResume=calls.filter(x=>x.method==='GET').length;
+queue=[
+  reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:01:05] 화자: 두 번째 구간'}]}]}),
+  reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:02:06] 화자: 세 번째 구간'}]}]})
+];
+const assembled=await getGeminiTranscriptionJob(partial.jobToken);
+assert.equal(assembled.status,'completed');
+assert.equal(assembled.completedSegments,3);
+assert.equal(assembled.transcript.split('\n').length,3);
+assert.equal(calls.filter(x=>x.method==='GET').length-readsBeforeResume,2);
+const readsBeforeRepeatedPoll=calls.filter(x=>x.method==='GET').length;
+queue=[];
+const reassembled=await getGeminiTranscriptionJob(assembled.jobToken);
+assert.equal(reassembled.status,'completed');
+assert.equal(reassembled.transcript,assembled.transcript);
+assert.equal(calls.filter(x=>x.method==='GET').length,readsBeforeRepeatedPoll);
+assert.ok(assembled.jobToken.length < 128000);
+
 // Completed interaction with no text must NEVER be published as full transcript.
 queue=[reply({id:'v1_another',status:'in_progress'})];
 const one=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
@@ -97,4 +132,4 @@ assert.equal(fileJob.segmentation,'file-clips');
 assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
