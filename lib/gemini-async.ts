@@ -31,6 +31,8 @@ type JobState = {
   createdAt: number;
   durationSeconds: number | null;
   chunkSeconds: number;
+  geminiFileUri?: string;
+  geminiMimeType?: string;
   segments: SegmentState[];
 };
 export type TranscriptionJobResult = {
@@ -38,7 +40,7 @@ export type TranscriptionJobResult = {
   jobToken: string;
   videoId: string;
   canonicalUrl: string;
-  segmentation: "clipped" | "whole-video";
+  segmentation: "file-clips" | "prompt-scoped" | "whole-video";
   durationSeconds: number | null;
   completedSegments: number;
   totalSegments: number;
@@ -80,6 +82,8 @@ function decodeJob(token: string): JobState {
   if (state.version !== 1 || !/^[\w-]{11}$/.test(state.videoId) ||
       !Number.isFinite(state.createdAt) || state.createdAt > Date.now() + 60_000 ||
       Date.now() - state.createdAt > TOKEN_VALID_MS ||
+      (state.geminiFileUri !== undefined && !/^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/files\/[a-zA-Z0-9_-]+$/.test(state.geminiFileUri)) ||
+      (state.geminiMimeType !== undefined && !/^video\/[a-z0-9.+-]+$/i.test(state.geminiMimeType)) ||
       !Array.isArray(state.segments) || state.segments.length < 1 || state.segments.length > MAX_SEGMENTS ||
       state.segments.some((s) => !Number.isInteger(s.startSeconds) || s.startSeconds < 0 ||
         (s.endSeconds !== null && (!Number.isInteger(s.endSeconds) || s.endSeconds <= s.startSeconds)) ||
@@ -167,13 +171,18 @@ function segmentPrompt(segment: SegmentState, language: string): string {
 }
 async function createInteraction(job: JobState, segment: SegmentState): Promise<void> {
   const canonicalUrl = `https://www.youtube.com/watch?v=${job.videoId}`;
-  const video: Record<string, unknown> = { type: "video", uri: canonicalUrl };
+  // Gemini Interactions accepts clipping only for Files API URIs. Real YouTube URLs
+  // return HTTP 400 (Invalid input at input[0].processing) for clip objects.
+  // On YouTube, submit the original video asynchronously and scope the TRANSCRIPT
+  // response to the requested time window in the prompt. Never label this as a
+  // physically clipped video; the whole source is still processed by Google.
+  const video: Record<string, unknown> = job.geminiFileUri
+    ? { type: "video", uri: job.geminiFileUri, mime_type: job.geminiMimeType ?? "video/mp4" }
+    : { type: "video", uri: canonicalUrl };
   if (segment.endSeconds !== null) {
-    video.processing = {
-      type: "static",
-      start_offset: segment.startSeconds,
-      end_offset: segment.endSeconds,
-    };
+    video.processing = job.geminiFileUri
+      ? {type:"static",start_offset:segment.startSeconds,end_offset:segment.endSeconds}
+      : "static";
   }
   const model = MODELS[segment.modelIndex];
   segment.attempts++;
@@ -252,7 +261,7 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued">, texts?: 
   const out: TranscriptionJobResult = {
     status, jobToken: encodeJob(job),videoId:job.videoId,
     canonicalUrl:`https://www.youtube.com/watch?v=${job.videoId}`,
-    segmentation:job.durationSeconds===null?"whole-video":"clipped",
+    segmentation:job.durationSeconds===null?"whole-video":job.geminiFileUri?"file-clips":"prompt-scoped",
     durationSeconds:job.durationSeconds,completedSegments:completed,totalSegments:total,
     segments:job.segments.map((s,i)=>({
       startSeconds:s.startSeconds,endSeconds:s.endSeconds,
@@ -278,6 +287,8 @@ export async function startGeminiTranscriptionJob(args: {
   language?:string;
   durationSeconds?:number;
   chunkSeconds?:number;
+  geminiFileUri?:string;
+  geminiMimeType?:string;
 }):Promise<TranscriptionJobResult> {
   getApiKey();
   const videoId=extractYouTubeVideoId(args.url);
@@ -287,8 +298,16 @@ export async function startGeminiTranscriptionJob(args: {
   if(args.durationSeconds!==undefined && (!Number.isInteger(args.durationSeconds)||args.durationSeconds<1||args.durationSeconds>86400)) {
     throw new Error("durationSeconds must be an integer between 1 and 86400.");
   }
+  if(args.geminiFileUri!==undefined && !/^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/files\/[a-zA-Z0-9_-]+$/.test(args.geminiFileUri)){
+    throw new Error("geminiFileUri must be a valid Gemini Files API URI.");
+  }
+  if(args.geminiMimeType!==undefined && !/^video\/[a-z0-9.+-]+$/i.test(args.geminiMimeType)){
+    throw new Error("geminiMimeType must be a video MIME type.");
+  }
   const duration=args.durationSeconds??await discoverDuration(videoId);
-  const job:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:duration,chunkSeconds,segments:createSegments(duration,chunkSeconds)};
+  const job:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:duration,chunkSeconds,
+    ...(args.geminiFileUri?{geminiFileUri:args.geminiFileUri,geminiMimeType:args.geminiMimeType??"video/mp4"}:{}),
+    segments:createSegments(duration,chunkSeconds)};
   // Eagerly start all clips with bounded concurrency; later polling only reads them.
   let cursor=0;
   await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{

@@ -18,14 +18,12 @@ global.fetch=async (uri,opts={})=>{
 let n=0;
 queue=[reply({error:{message:'temporary high demand'}},503),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'})];
 const started=await startGeminiTranscriptionJob({url:'https://youtu.be/G-8cDsHLrD0',language:'ko-KR',durationSeconds:520,chunkSeconds:240});
-assert.equal(started.totalSegments,3);assert.equal(started.segmentation,'clipped');
+assert.equal(started.totalSegments,3);assert.equal(started.segmentation,'prompt-scoped');
 assert.equal(started.status,'in_progress');assert.equal(started.segments.every(x=>x.attempts===1),true);
-assert.deepEqual(calls.filter(x=>x.method==='POST' && x.payload).slice(0,4).map(x=>x.payload.input[0].processing).map(x=>JSON.stringify(x)).sort(),[
-  {type:'static',start_offset:0,end_offset:240},
-  {type:'static',start_offset:0,end_offset:240},
-  {type:'static',start_offset:237,end_offset:480},
-  {type:'static',start_offset:477,end_offset:520}
-].map(x=>JSON.stringify(x)).sort());
+assert.deepEqual(calls.filter(x=>x.method==='POST' && x.payload).slice(0,4).map(x=>x.payload.input[0].processing),
+    ['static','static','static','static']);
+const prompts=calls.filter(x=>x.method==='POST' && x.payload).map(x=>x.payload.input[1].text).join(' ');
+assert.ok(prompts.includes('00:03:57') && prompts.includes('00:07:57'));
 const statuses=['00:00:05','00:04:05','00:08:12'];
 queue=statuses.map(t=>reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:`[${t}] 화자 1: 테스트 발화` }]}]}));
 let completed=await getGeminiTranscriptionJob(started.jobToken);
@@ -52,4 +50,12 @@ queue=[reply({status:'completed',steps:[{type:'model_output',content:[{type:'tex
 const ready=await getGeminiTranscriptionJob(retry.jobToken);
 assert.equal(ready.status,'completed');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','clip windows overlap','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+// Files API URI uses native physical clip offsets instead of YouTube prompt scoping.
+queue=[reply({id:'v1_gemfile',status:'in_progress'})];
+const fileJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60,
+   geminiFileUri:'https://generativelanguage.googleapis.com/v1beta/files/abc123',geminiMimeType:'video/mp4'});
+assert.equal(fileJob.segmentation,'file-clips');
+assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:0,end_offset:60});
+assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
+
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
