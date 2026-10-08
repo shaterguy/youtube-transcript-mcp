@@ -30,6 +30,8 @@ export type SegmentState = {
   // Compressed transcript allows safe resume without re-reading completed Gemini jobs.
   // The signed token is integrity-protected, not encrypted.
   transcriptZ?: string;
+  read429Count?: number;
+  nextStatusCheckAt?: number;
 };
 type JobState = {
   version: 1;
@@ -116,7 +118,9 @@ function decodeJob(token: string): JobState {
         !Number.isInteger(s.modelIndex) || s.modelIndex < 0 || s.modelIndex >= MODELS.length ||
         !Number.isInteger(s.attempts) || s.attempts < 0 || s.attempts > 20 ||
         (s.interactionId !== null && !/^v1_[a-zA-Z0-9_-]+$/.test(s.interactionId)) ||
-        (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))))) {
+        (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))) ||
+        (s.read429Count !== undefined && (!Number.isInteger(s.read429Count) || s.read429Count < 0 || s.read429Count > 20)) ||
+        (s.nextStatusCheckAt !== undefined && (!Number.isFinite(s.nextStatusCheckAt) || s.nextStatusCheckAt < 0 || s.nextStatusCheckAt > state.createdAt + TOKEN_VALID_MS)))) {
     throw new Error("Malformed or expired transcription job token.");
   }
   return state;
@@ -394,6 +398,10 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
         continue;
       }
+      if(segment.nextStatusCheckAt && Date.now() < segment.nextStatusCheckAt){
+        statuses[i]="in_progress";
+        continue;
+      }
       try{
         const payload=await requestGemini(`${GEMINI_ENDPOINT}/${encodeURIComponent(segment.interactionId)}`,"GET");
         const state=String(payload.status||"");
@@ -404,23 +412,51 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
             statuses[i]="completed";
             texts[i]=txt;
             delete segment.lastError;
+            delete segment.read429Count;
+            delete segment.nextStatusCheckAt;
           }
           else{statuses[i]="failed";segment.lastError="Completed interaction contained no transcript text.";}
         }else if(state==="in_progress"||state==="queued"||state==="requires_action"){
           statuses[i]="in_progress";
+          delete segment.lastError;
+          delete segment.read429Count;
+          delete segment.nextStatusCheckAt;
         }else if(state==="failed"||state==="cancelled"||state==="incomplete"){
           const message=providerFailure(payload);
           segment.lastError=message;
           if(segment.attempts<3 && isRetryableError(message)){
             segment.modelIndex=Math.min(segment.modelIndex+1,MODELS.length-1);
             segment.interactionId=null;
+            delete segment.read429Count;
+            delete segment.nextStatusCheckAt;
             await createInteraction(job,segment);
             statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
           } else statuses[i]="failed";
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
       }catch(err){
-        segment.lastError=safeMessage(err instanceof Error?err.message:err);
-        // A status-read timeout is not proof that the remote interaction failed.
+        const message=safeMessage(err instanceof Error?err.message:err);
+        const isQuotaRead429=/^HTTP 429(?:\\b|:)/.test(message);
+        if(isQuotaRead429){
+          // A 429 GET does NOT mean the remote transcription failed. However, a
+          // repeatedly inaccessible interaction cannot finish the user's job.
+          // After successive 429s, start one alternative-model interaction.
+          // Keep all already cached segments and the overall request's identity.
+          const already429=/^HTTP 429(?:\\b|:)/.test(segment.lastError ?? "");
+          segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
+          if(segment.read429Count>=2 && segment.attempts<3 && segment.modelIndex<MODELS.length-1){
+            segment.modelIndex++;
+            segment.interactionId=null;
+            delete segment.read429Count;
+            delete segment.nextStatusCheckAt;
+            await createInteraction(job,segment);
+            statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
+            continue;
+          }
+          const delay=parseRetryFromMessage(message) ?? 30_000;
+          segment.nextStatusCheckAt=Date.now()+Math.max(1_000,delay);
+        }
+        segment.lastError=message;
+        // Other status-read timeouts likewise do not prove that the remote job failed.
         statuses[i]="in_progress";
       }
     }
