@@ -181,7 +181,7 @@ async function createInteraction(job: JobState, segment: SegmentState): Promise<
     : { type: "video", uri: canonicalUrl };
   if (segment.endSeconds !== null) {
     video.processing = job.geminiFileUri
-      ? {type:"static",start_offset:segment.startSeconds,end_offset:segment.endSeconds}
+      ? {type:"static",start_offset:`${segment.startSeconds}s`,end_offset:`${segment.endSeconds}s`}
       : "static";
   }
   const model = MODELS[segment.modelIndex];
@@ -358,7 +358,7 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
           const txt=extractOutput(payload);
           if(txt){statuses[i]="completed";texts[i]=txt;delete segment.lastError;}
           else{statuses[i]="failed";segment.lastError="Completed interaction contained no transcript text.";}
-        }else if(state==="in_progress"||state==="requires_action"){
+        }else if(state==="in_progress"||state==="queued"||state==="requires_action"){
           statuses[i]="in_progress";
         }else if(state==="failed"||state==="cancelled"||state==="incomplete"){
           const message=providerFailure(payload);
