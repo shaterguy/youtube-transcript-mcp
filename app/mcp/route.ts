@@ -6,6 +6,7 @@ import {
   TRANSCRIPT_CACHE_VERSION,
 } from "../../lib/transcript-cache";
 import { TranscriptError } from "../../lib/youtube";
+import { startGeminiTranscriptionJob, getGeminiTranscriptionJob } from "../../lib/gemini-async";
 import {
   YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
   YOUTUBE_RESPONSE_CONTRACT,
@@ -88,6 +89,31 @@ const responseContractSchema = z.object({
   }),
 });
 
+const asyncJobOutputSchema = z.object({
+  status: z.enum(["in_progress", "completed", "failed"]),
+  jobToken: z.string(),
+  videoId: z.string(),
+  canonicalUrl: z.string(),
+  segmentation: z.enum(["clipped", "whole-video"]),
+  durationSeconds: z.number().int().nullable(),
+  completedSegments: z.number().int().nonnegative(),
+  totalSegments: z.number().int().positive(),
+  segments: z.array(z.object({
+    startSeconds: z.number().int().nonnegative(),
+    endSeconds: z.number().int().nullable(),
+    modelIndex: z.number().int().nonnegative(),
+    model: z.string(),
+    attempts: z.number().int().nonnegative(),
+    status: z.enum(["queued", "in_progress", "completed", "failed"]),
+    error: z.string().optional(),
+  })),
+  transcript: z.string().optional(),
+  characterCount: z.number().int().nonnegative().optional(),
+  lineCount: z.number().int().nonnegative().optional(),
+  first30Lines: z.array(z.string()).optional(),
+  error: z.string().optional(),
+});
+
 const handler = createMcpHandler(
   async (server) => {
     server.registerTool(
@@ -117,6 +143,72 @@ const handler = createMcpHandler(
           },
         ],
       })
+    );
+
+    server.registerTool(
+      "start_youtube_transcript_job",
+      {
+        title: "Start background Gemini transcription with verified time clips",
+        description: [
+          "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
+          "returns a signed jobToken immediately, and transcribes known-duration videos in overlapping",
+          "time clips with bounded concurrency and exponential 429/503/5xx retry.",
+          "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
+          "be verified, the full video is submitted asynchronously as one job (segmentation=whole-video).",
+          "Always follow up by calling get_youtube_transcript_job with the latest returned jobToken",
+          "until status completed or failed. Never present a partial job as a complete video transcript.",
+        ].join(" "),
+        inputSchema: {
+          url: z.string().min(1).max(2048),
+          language: z.string().min(2).max(35).optional(),
+          durationSeconds: z.number().int().min(1).max(86400).optional(),
+          chunkSeconds: z.number().int().min(60).max(900).optional(),
+        },
+        outputSchema: asyncJobOutputSchema.shape,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async (args) => {
+        try {
+          const result = await startGeminiTranscriptionJob(args);
+          return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
+        } catch (error) {
+          return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start transcription job." }] };
+        }
+      }
+    );
+
+    server.registerTool(
+      "get_youtube_transcript_job",
+      {
+        title: "Poll background transcription job and assemble completed clips",
+        description: [
+          "Poll Gemini server-side interaction status, automatically recover from transient 429/503",
+          "failures with backoff/model fallback, and combine clips only when ALL segments completed.",
+          "Pass the most recently returned jobToken on every poll: retries change the signed token.",
+          "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
+        ].join(" "),
+        inputSchema: { jobToken: z.string().min(1).max(24000) },
+        outputSchema: asyncJobOutputSchema.shape,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async ({ jobToken }) => {
+        try {
+          const result = await getGeminiTranscriptionJob(jobToken);
+          return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
+        } catch (error) {
+          return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not poll transcription job." }] };
+        }
+      }
     );
 
     server.registerTool(
