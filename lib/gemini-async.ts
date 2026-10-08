@@ -329,7 +329,7 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
           if(segment.attempts>0 && segment.modelIndex<MODELS.length-1) segment.modelIndex++;
           await createInteraction(job,segment);
         }
-        statuses[i]=segment.interactionId?"in_progress":"failed";
+        statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
         continue;
       }
       try{
@@ -348,7 +348,7 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
             segment.modelIndex=Math.min(segment.modelIndex+1,MODELS.length-1);
             segment.interactionId=null;
             await createInteraction(job,segment);
-            statuses[i]=segment.interactionId?"in_progress":"failed";
+            statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
           } else statuses[i]="failed";
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
       }catch(err){
