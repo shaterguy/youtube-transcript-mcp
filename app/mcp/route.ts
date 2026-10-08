@@ -166,7 +166,7 @@ const handler = createMcpHandler(
         },
         outputSchema: asyncJobOutputSchema.shape,
         annotations: {
-          readOnlyHint: true,
+          readOnlyHint: false,
           destructiveHint: false,
           idempotentHint: false,
           openWorldHint: true,
@@ -195,7 +195,7 @@ const handler = createMcpHandler(
         inputSchema: { jobToken: z.string().min(1).max(24000) },
         outputSchema: asyncJobOutputSchema.shape,
         annotations: {
-          readOnlyHint: true,
+          readOnlyHint: false,
           destructiveHint: false,
           idempotentHint: false,
           openWorldHint: true,
