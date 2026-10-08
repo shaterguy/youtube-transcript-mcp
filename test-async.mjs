@@ -124,6 +124,49 @@ queue=[
 const recoveredPost429=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 assert.equal(recoveredPost429.status,'in_progress');
 
+// A persistent GET 429 is throttled, then rerouted to the next model
+// after a second independent status read; no completed clip is discarded.
+queue=[reply({id:'v1_get429_fallback_1',status:'in_progress'})];
+const stuck429=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+queue=[reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429)];
+const quotaFirst=await getGeminiTranscriptionJob(stuck429.jobToken);
+assert.equal(quotaFirst.status,'in_progress');
+assert.equal(quotaFirst.segments[0].modelIndex,0);
+const beforeCooldownCall=calls.length;
+queue=[];
+const quotaCooling=await getGeminiTranscriptionJob(quotaFirst.jobToken);
+assert.equal(quotaCooling.status,'in_progress');
+assert.equal(calls.length,beforeCooldownCall, 'GET during Retry-After cooldown');
+const advanceNow=Date.now;
+let quotaSecond;
+Date.now=()=>advanceNow()+30_000;
+try{
+  queue=[
+    reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429),
+    reply({id:'v1_get429_fallback_2',status:'in_progress'})
+  ];
+  quotaSecond=await getGeminiTranscriptionJob(quotaCooling.jobToken);
+} finally {Date.now=advanceNow;}
+assert.equal(quotaSecond.status,'in_progress');
+assert.equal(quotaSecond.segments[0].modelIndex,1);
+assert.equal(quotaSecond.segments[0].attempts,2);
+assert.notEqual(quotaSecond.jobToken,quotaFirst.jobToken);
+
+// When a provider starts answering status GETs again, stale 429 is removed.
+queue=[reply({id:'v1_quota_then_ok',status:'in_progress'})];
+const recoveringStatus=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+queue=[reply({error:{message:'Rate limit exceeded. Please retry in 0s'}},429)];
+const firstBlocked=await getGeminiTranscriptionJob(recoveringStatus.jobToken);
+const advanceNow2=Date.now;
+let clearedError;
+Date.now=()=>advanceNow2()+2_000;
+try{
+  queue=[reply({status:'in_progress'})];
+  clearedError=await getGeminiTranscriptionJob(firstBlocked.jobToken);
+} finally {Date.now=advanceNow2;}
+assert.equal(clearedError.status,'in_progress');
+assert.equal(clearedError.segments[0].error,undefined);
+
 // Files API URI uses native physical clip offsets instead of YouTube prompt scoping.
 queue=[reply({id:'v1_gemfile',status:'in_progress'})];
 const fileJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60,
@@ -132,4 +175,4 @@ assert.equal(fileJob.segmentation,'file-clips');
 assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 model fallback','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
