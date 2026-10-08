@@ -98,15 +98,23 @@ function isRetryableStatus(code: number): boolean {
   return [408, 429, 500, 502, 503, 504].includes(code);
 }
 function isRetryableError(message: string): boolean {
-  return /\b(429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|overloaded|high demand|rate limit|timeout|timed out)\b/i.test(message);
+  return /\b(429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|INTERNAL|overloaded|high demand|rate limit|timeout|timed out)\b/i.test(message);
 }
 function parseRetryAfter(headers: Headers): number | null {
   const raw = headers.get("Retry-After");
   if (!raw) return null;
   const n = Number(raw);
-  if (Number.isFinite(n) && n >= 0) return Math.min(15_000, n * 1000);
+  if (Number.isFinite(n) && n >= 0) return Math.min(60_000, n * 1000);
   const date = Date.parse(raw);
-  return Number.isFinite(date) ? Math.max(0, Math.min(15_000, date - Date.now())) : null;
+  return Number.isFinite(date) ? Math.max(0, Math.min(60_000, date - Date.now())) : null;
+}
+function parseRetryFromMessage(value: unknown): number | null {
+  const text = String(value ?? "");
+  const match = /\b(?:retry\s+(?:after|in)|wait)\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m)\b/i.exec(text);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(60_000, Math.round(n * (match[2].toLowerCase().startsWith("m") ? 60_000 : 1000)));
 }
 function safeMessage(value: unknown): string {
   return String(value ?? "Unknown Gemini error").replace(/AIza[\w-]+/g, "[REDACTED_KEY]").slice(0, 500);
@@ -140,7 +148,10 @@ async function requestGemini(
         ? (json.error as {message?: unknown}).message : undefined) ?? `HTTP ${response.status}`;
       lastError = new Error(`HTTP ${response.status}: ${safeMessage(detail)}`);
       if (!isRetryableStatus(response.status) || attempt === RETRY_DELAYS_MS.length) break;
-      const retryAfter = parseRetryAfter(response.headers);
+      // Polling too early during a free-tier minute-wide 429 window only makes it worse.
+      // Keep the interaction ID and let the caller poll again after the indicated delay.
+      if (response.status === 429 && method === "GET") break;
+      const retryAfter = parseRetryAfter(response.headers) ?? parseRetryFromMessage(detail);
       await new Promise((resolve) => setTimeout(resolve, retryAfter ?? RETRY_DELAYS_MS[attempt]));
     } catch (err) {
       lastError = new Error(`Gemini ${method} request failed: ${safeMessage(err instanceof Error ? err.message : err)}`);
