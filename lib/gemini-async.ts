@@ -4,12 +4,16 @@
  * No in-process background promises or ephemeral server-side job map is used.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { extractYouTubeVideoId } from "./youtube";
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const API_REVISION = "2026-05-20";
 const MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"] as const;
 const TOKEN_VALID_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_SIGNED_JOB_TOKEN_LENGTH = 128_000;
+const MAX_COMPRESSED_SEGMENT_CHARS = 48_000;
+const MAX_DECOMPRESSED_SEGMENT_BYTES = 160_000;
 const MAX_SEGMENTS = 24;
 const MAX_SIMULTANEOUS_STARTS = 2;
 const CLIP_OVERLAP_SECONDS = 3;
@@ -23,6 +27,9 @@ export type SegmentState = {
   modelIndex: number;
   attempts: number;
   lastError?: string;
+  // Compressed transcript allows safe resume without re-reading completed Gemini jobs.
+  // The signed token is integrity-protected, not encrypted.
+  transcriptZ?: string;
 };
 type JobState = {
   version: 1;
@@ -65,10 +72,29 @@ function sign(payload: string): string {
 }
 function encodeJob(state: JobState): string {
   const body = Buffer.from(JSON.stringify(state)).toString("base64url");
-  return `${body}.${sign(body)}`;
+  const token = `${body}.${sign(body)}`;
+  if (token.length > MAX_SIGNED_JOB_TOKEN_LENGTH) {
+    throw new Error("Transcription job state exceeded the token size limit. Use smaller clip windows.");
+  }
+  return token;
+}
+function compressTranscript(text: string): string {
+  const packed = deflateRawSync(Buffer.from(text, "utf8"), { level: 9 }).toString("base64url");
+  if (packed.length > MAX_COMPRESSED_SEGMENT_CHARS) {
+    throw new Error("Transcribed clip exceeded the maximum cached text size.");
+  }
+  return packed;
+}
+function restoreTranscript(encoded: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded) || encoded.length > MAX_COMPRESSED_SEGMENT_CHARS) {
+    throw new Error("Invalid cached transcript encoding.");
+  }
+  return inflateRawSync(Buffer.from(encoded, "base64url"), {
+    maxOutputLength: MAX_DECOMPRESSED_SEGMENT_BYTES,
+  }).toString("utf8");
 }
 function decodeJob(token: string): JobState {
-  if (token.length > 24_000 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+  if (token.length > MAX_SIGNED_JOB_TOKEN_LENGTH || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
     throw new Error("Invalid transcription job token.");
   }
   const [body, signature] = token.split(".");
@@ -89,7 +115,8 @@ function decodeJob(token: string): JobState {
         (s.endSeconds !== null && (!Number.isInteger(s.endSeconds) || s.endSeconds <= s.startSeconds)) ||
         !Number.isInteger(s.modelIndex) || s.modelIndex < 0 || s.modelIndex >= MODELS.length ||
         !Number.isInteger(s.attempts) || s.attempts < 0 || s.attempts > 20 ||
-        (s.interactionId !== null && !/^v1_[a-zA-Z0-9_-]+$/.test(s.interactionId)))) {
+        (s.interactionId !== null && !/^v1_[a-zA-Z0-9_-]+$/.test(s.interactionId)) ||
+        (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))))) {
     throw new Error("Malformed or expired transcription job token.");
   }
   return state;
@@ -353,6 +380,11 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
     while(cursor<job.segments.length){
       const i=cursor++;
       const segment=job.segments[i];
+      if(segment.transcriptZ){
+        texts[i]=restoreTranscript(segment.transcriptZ);
+        statuses[i]="completed";
+        continue;
+      }
       if(!segment.interactionId){
         if(segment.attempts<3){
           // A previous initiation failed; retry when the client presents its latest token.
@@ -367,7 +399,12 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         const state=String(payload.status||"");
         if(state==="completed"){
           const txt=extractOutput(payload);
-          if(txt){statuses[i]="completed";texts[i]=txt;delete segment.lastError;}
+          if(txt){
+            segment.transcriptZ=compressTranscript(txt);
+            statuses[i]="completed";
+            texts[i]=txt;
+            delete segment.lastError;
+          }
           else{statuses[i]="failed";segment.lastError="Completed interaction contained no transcript text.";}
         }else if(state==="in_progress"||state==="queued"||state==="requires_action"){
           statuses[i]="in_progress";
