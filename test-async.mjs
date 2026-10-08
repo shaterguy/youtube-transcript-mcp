@@ -57,7 +57,7 @@ queue=[
 const assembled=await getGeminiTranscriptionJob(partial.jobToken);
 assert.equal(assembled.status,'completed');
 assert.equal(assembled.completedSegments,3);
-assert.equal(assembled.transcript.split('\\n').length,3);
+assert.equal(assembled.transcript.split('\n').length,3);
 assert.equal(calls.filter(x=>x.method==='GET').length-readsBeforeResume,2);
 const readsBeforeRepeatedPoll=calls.filter(x=>x.method==='GET').length;
 queue=[];
