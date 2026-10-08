@@ -435,13 +435,13 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
       }catch(err){
         const message=safeMessage(err instanceof Error?err.message:err);
-        const isQuotaRead429=/^HTTP 429(?:\\b|:)/.test(message);
+        const isQuotaRead429=/^HTTP 429:/.test(message);
         if(isQuotaRead429){
           // A 429 GET does NOT mean the remote transcription failed. However, a
           // repeatedly inaccessible interaction cannot finish the user's job.
           // After successive 429s, start one alternative-model interaction.
           // Keep all already cached segments and the overall request's identity.
-          const already429=/^HTTP 429(?:\\b|:)/.test(segment.lastError ?? "");
+          const already429=/^HTTP 429:/.test(segment.lastError ?? "");
           segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
           if(segment.read429Count>=2 && segment.attempts<3 && segment.modelIndex<MODELS.length-1){
             segment.modelIndex++;
