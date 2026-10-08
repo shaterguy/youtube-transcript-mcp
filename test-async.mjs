@@ -50,12 +50,21 @@ queue=[reply({status:'completed',steps:[{type:'model_output',content:[{type:'tex
 const ready=await getGeminiTranscriptionJob(retry.jobToken);
 assert.equal(ready.status,'completed');
 
+// Gemini may leave a background request queued during high demand. It is not a failure.
+queue=[reply({id:'v1_queued_interaction',status:'queued'})];
+const queuedJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+queue=[reply({status:'queued'})];
+const queuedCheck=await getGeminiTranscriptionJob(queuedJob.jobToken);
+assert.equal(queuedCheck.status,'in_progress');
+assert.equal(queuedCheck.segments[0].status,'in_progress');
+assert.equal(queuedCheck.segments[0].modelIndex,0);
+
 // Files API URI uses native physical clip offsets instead of YouTube prompt scoping.
 queue=[reply({id:'v1_gemfile',status:'in_progress'})];
 const fileJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60,
    geminiFileUri:'https://generativelanguage.googleapis.com/v1beta/files/abc123',geminiMimeType:'video/mp4'});
 assert.equal(fileJob.segmentation,'file-clips');
-assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:0,end_offset:60});
+assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
