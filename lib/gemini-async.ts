@@ -437,10 +437,8 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         const message=safeMessage(err instanceof Error?err.message:err);
         const isQuotaRead429=/^HTTP 429:/.test(message);
         if(isQuotaRead429){
-          // A 429 GET does NOT mean the remote transcription failed. However, a
-          // repeatedly inaccessible interaction cannot finish the user's job.
-          // After successive 429s, start one alternative-model interaction.
-          // Keep all already cached segments and the overall request's identity.
+          // A 429 GET never proves remote failure. Keep the active interaction ID,
+          // retry only after the provider cooldown, and do not submit duplicates.
           const already429=/^HTTP 429:/.test(segment.lastError ?? "");
           segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
           const delay=parseRetryFromMessage(message) ?? 30_000;

@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+const require=createRequire(import.meta.url);
+const { fetchYouTubeTranscript }=require('./test-output/youtube.js');
+process.env.GEMINI_API_KEY='test-key-do-not-use';
+process.env.YT_DLP_BIN=path.resolve('./test-yt-dlp-fixture.cjs');
+const originalFetch=global.fetch;
+let requests=0;
+global.fetch=async()=>{requests++;throw new Error('Unexpected Gemini call when captions exist');};
+const caption=await fetchYouTubeTranscript('https://youtu.be/5k0tCrXdIIM','ko-KR');
+assert.equal(caption.source,'yt-dlp');
+assert.match(caption.transcript,/\[00:00:01\] Original caption sentence/);
+assert.equal(requests,0);
+
+global.fetch=async(uri)=>{requests++;assert.ok(String(uri).includes('gemini-3.6-flash:generateContent'));
+  return {ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:'[00:00:01] 화자: Gemini 전사'}]}}]})};};
+const fallback=await fetchYouTubeTranscript('AAAAA000000');
+assert.equal(fallback.source,'gemini');
+assert.equal(fallback.transcript,'[00:00:01] 화자: Gemini 전사');
+assert.equal(requests,1);
+global.fetch=originalFetch;
+console.log(JSON.stringify({transcript_flow:'PASS',caption_bypasses_gemini:true,fallback_model:'gemini-3.6-flash'}));

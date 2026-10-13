@@ -97,7 +97,7 @@ export async function fetchYouTubeTranscript(
   } catch (publicCaptionError) {
     // Transport or deployment failure does not establish absent captions.
     if (!(publicCaptionError instanceof YtDlpCaptionError) ||
-        !["no_captions", "invalid_captions"].includes(publicCaptionError.reason)) {
+        ["executable_unavailable", "video_unavailable"].includes(publicCaptionError.reason)) {
       throw new TranscriptError(
         publicCaptionError instanceof Error ? publicCaptionError.message : "Could not check captions."
       );
