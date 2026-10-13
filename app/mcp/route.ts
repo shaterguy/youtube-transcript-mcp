@@ -94,7 +94,8 @@ const asyncJobOutputSchema = z.object({
   jobToken: z.string(),
   videoId: z.string(),
   canonicalUrl: z.string(),
-  segmentation: z.enum(["file-clips", "prompt-scoped", "whole-video"]),
+  segmentation: z.enum(["file-clips", "prompt-scoped", "whole-video", "captions"]),
+  source: z.enum(["yt-dlp", "gemini"]),
   durationSeconds: z.number().int().nullable(),
   completedSegments: z.number().int().nonnegative(),
   totalSegments: z.number().int().positive(),
@@ -152,7 +153,7 @@ const handler = createMcpHandler(
         description: [
           "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
           "returns a signed jobToken immediately and transcribes known-duration videos in overlapping time windows.",
-          "YouTube URL uses full-video background requests with time-scoped prompts, NOT physical video clipping.",
+          "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
           "Optional Gemini Files API URI enables actual clipped media windows. Supports 429/503/5xx retry.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
           "be verified, the full video is submitted asynchronously as one job (segmentation=whole-video).",

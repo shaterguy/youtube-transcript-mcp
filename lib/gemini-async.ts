@@ -6,6 +6,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { extractYouTubeVideoId } from "./youtube";
+import { getYouTubeCaptionsWithYtDlp, YtDlpCaptionError } from "./yt-dlp";
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const API_REVISION = "2026-05-20";
@@ -43,13 +44,15 @@ type JobState = {
   geminiFileUri?: string;
   geminiMimeType?: string;
   segments: SegmentState[];
+  captionZ?: string;
 };
 export type TranscriptionJobResult = {
   status: JobStatus;
   jobToken: string;
   videoId: string;
   canonicalUrl: string;
-  segmentation: "file-clips" | "prompt-scoped" | "whole-video";
+  segmentation: "file-clips" | "prompt-scoped" | "whole-video" | "captions";
+  source: "yt-dlp" | "gemini";
   durationSeconds: number | null;
   completedSegments: number;
   totalSegments: number;
@@ -112,6 +115,7 @@ function decodeJob(token: string): JobState {
       Date.now() - state.createdAt > TOKEN_VALID_MS ||
       (state.geminiFileUri !== undefined && !/^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/files\/[a-zA-Z0-9_-]+$/.test(state.geminiFileUri)) ||
       (state.geminiMimeType !== undefined && !/^video\/[a-z0-9.+-]+$/i.test(state.geminiMimeType)) ||
+      (state.captionZ !== undefined && (typeof state.captionZ !== "string" || state.captionZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(state.captionZ))) ||
       !Array.isArray(state.segments) || state.segments.length < 1 || state.segments.length > MAX_SEGMENTS ||
       state.segments.some((s) => !Number.isInteger(s.startSeconds) || s.startSeconds < 0 ||
         (s.endSeconds !== null && (!Number.isInteger(s.endSeconds) || s.endSeconds <= s.startSeconds)) ||
@@ -283,8 +287,10 @@ async function discoverDuration(videoId: string): Promise<number | null> {
   } catch {return null;}
 }
 
-function createSegments(duration: number | null, chunkSeconds: number): SegmentState[] {
-  if (duration === null) return [{startSeconds: 0,endSeconds: null,interactionId: null,modelIndex: 0,attempts: 0}];
+function createSegments(duration: number | null, chunkSeconds: number, hasPhysicalClipSource: boolean): SegmentState[] {
+  // YouTube URI does not support native clip offsets. Do not submit the same
+  // complete YouTube video separately for each prompt-scoped interval.
+  if (!hasPhysicalClipSource || duration === null) return [{startSeconds: 0,endSeconds: null,interactionId: null,modelIndex: 0,attempts: 0}];
   const count = Math.ceil(duration / chunkSeconds);
   if (count > MAX_SEGMENTS) throw new Error(`Video duration requires ${count} segments; maximum ${MAX_SEGMENTS}. Increase chunkSeconds.`);
   return Array.from({length: count},(_,idx)=>({
@@ -302,8 +308,9 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued">, texts?: 
   const status: JobStatus = hasError ? "failed" : completed===total ? "completed" : "in_progress";
   const out: TranscriptionJobResult = {
     status, jobToken: encodeJob(job),videoId:job.videoId,
+    source:job.captionZ?"yt-dlp":"gemini",
     canonicalUrl:`https://www.youtube.com/watch?v=${job.videoId}`,
-    segmentation:job.durationSeconds===null?"whole-video":job.geminiFileUri?"file-clips":"prompt-scoped",
+    segmentation:job.captionZ?"captions":job.geminiFileUri&&job.durationSeconds!==null?"file-clips":"whole-video",
     durationSeconds:job.durationSeconds,completedSegments:completed,totalSegments:total,
     segments:job.segments.map((s,i)=>({
       startSeconds:s.startSeconds,endSeconds:s.endSeconds,
@@ -332,7 +339,6 @@ export async function startGeminiTranscriptionJob(args: {
   geminiFileUri?:string;
   geminiMimeType?:string;
 }):Promise<TranscriptionJobResult> {
-  getApiKey();
   const videoId=extractYouTubeVideoId(args.url);
   const language=args.language?.trim()||"ko-KR";
   const chunkSeconds=args.chunkSeconds??240;
@@ -346,10 +352,24 @@ export async function startGeminiTranscriptionJob(args: {
   if(args.geminiMimeType!==undefined && !/^video\/[a-z0-9.+-]+$/i.test(args.geminiMimeType)){
     throw new Error("geminiMimeType must be a video MIME type.");
   }
+  // The asynchronous tool follows the same caption-first contract as the
+  // synchronous tool. Files API input is already physically clipped media.
+  if (!args.geminiFileUri) {
+    try {
+      const captions=await getYouTubeCaptionsWithYtDlp(videoId,language);
+      const captionJob:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:args.durationSeconds??null,
+        chunkSeconds,captionZ:compressTranscript(captions.transcript),
+        segments:[{startSeconds:0,endSeconds:null,interactionId:null,modelIndex:0,attempts:0}]};
+      return makeView(captionJob,["completed"],[captions.transcript]);
+    } catch (error) {
+      if (!(error instanceof YtDlpCaptionError) || ["executable_unavailable","video_unavailable"].includes(error.reason)) throw error;
+    }
+  }
+  getApiKey();
   const duration=args.durationSeconds??await discoverDuration(videoId);
   const job:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:duration,chunkSeconds,
     ...(args.geminiFileUri?{geminiFileUri:args.geminiFileUri,geminiMimeType:args.geminiMimeType??"video/mp4"}:{}),
-    segments:createSegments(duration,chunkSeconds)};
+    segments:createSegments(duration,chunkSeconds,Boolean(args.geminiFileUri))};
   // Eagerly start all clips with bounded concurrency; later polling only reads them.
   let cursor=0;
   await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
@@ -376,6 +396,7 @@ function providerFailure(interaction:Record<string,unknown>):string {
 }
 export async function getGeminiTranscriptionJob(jobToken:string):Promise<TranscriptionJobResult>{
   const job=decodeJob(jobToken);
+  if(job.captionZ) return makeView(job,["completed"],[restoreTranscript(job.captionZ)]);
   getApiKey();
   const statuses:Array<JobStatus|"queued">=Array.from({length:job.segments.length},()=>"queued");
   const texts:string[]=Array.from({length:job.segments.length},()=>"");

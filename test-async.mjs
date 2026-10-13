@@ -3,6 +3,10 @@ import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
 const {startGeminiTranscriptionJob,getGeminiTranscriptionJob}=require('./test-output/gemini-async.js');
 process.env.GEMINI_API_KEY='test-key-do-not-use';
+const ytDlp=require('./test-output/yt-dlp.js');
+ytDlp.getYouTubeCaptionsWithYtDlp=async()=>{throw new ytDlp.YtDlpCaptionError('No captions in fixture','no_captions');};
+const GEMINI_FILE='https://generativelanguage.googleapis.com/v1beta/files/abc123';
+
 
 function reply(body,status=200,headers={}){
   return {ok:status>=200 && status<300,status,headers:new Headers(headers),json:async()=>body,text:async()=>JSON.stringify(body)};
@@ -17,11 +21,10 @@ global.fetch=async (uri,opts={})=>{
 };
 let n=0;
 queue=[reply({error:{message:'temporary high demand'}},503),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'})];
-const started=await startGeminiTranscriptionJob({url:'https://youtu.be/G-8cDsHLrD0',language:'ko-KR',durationSeconds:520,chunkSeconds:240});
-assert.equal(started.totalSegments,3);assert.equal(started.segmentation,'prompt-scoped');
+const started=await startGeminiTranscriptionJob({url:'https://youtu.be/G-8cDsHLrD0',language:'ko-KR',durationSeconds:520,chunkSeconds:240,geminiFileUri:GEMINI_FILE});
+assert.equal(started.totalSegments,3);assert.equal(started.segmentation,'file-clips');
 assert.equal(started.status,'in_progress');assert.equal(started.segments.every(x=>x.attempts===1),true);
-assert.deepEqual(calls.filter(x=>x.method==='POST' && x.payload).slice(0,4).map(x=>x.payload.input[0].processing),
-    ['static','static','static','static']);
+assert.equal(calls.filter(x=>x.method==='POST' && x.payload).slice(0,4).every(x=>x.payload.input[0].processing.type==='static'),true);
 const prompts=calls.filter(x=>x.method==='POST' && x.payload).map(x=>x.payload.input[1].text).join(' ');
 assert.ok(prompts.includes('00:03:57') && prompts.includes('00:07:57'));
 const statuses=['00:00:05','00:04:05','00:08:12'];
@@ -39,7 +42,7 @@ queue=[
   reply({id:'v1_keep2',status:'in_progress'}),
   reply({id:'v1_keep3',status:'in_progress'})
 ];
-const multi=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:180,chunkSeconds:60});
+const multi=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:180,chunkSeconds:60,geminiFileUri:GEMINI_FILE});
 assert.equal(multi.totalSegments,3);
 queue=[
   reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:00:01] 화자: 첫 구간'}]}]}),
@@ -175,4 +178,25 @@ assert.equal(fileJob.segmentation,'file-clips');
 assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry with one model','Gemini Files native clipping','queued background handling','INTERNAL provider retry','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 preserves active interaction','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+
+// Genuine YouTube URI must be uploaded only ONCE even with known 9-minute
+// duration; do not reinterpret prompt windows as physical clips.
+queue=[reply({id:'v1_once',status:'in_progress'})];
+const beforeOnce=calls.filter(x=>x.method==='POST').length;
+const whole=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:520,chunkSeconds:60});
+assert.equal(whole.segmentation,'whole-video');
+assert.equal(whole.totalSegments,1);
+assert.equal(calls.filter(x=>x.method==='POST').length-beforeOnce,1);
+// Existing human/auto captions must bypass Gemini even for the async tool.
+ytDlp.getYouTubeCaptionsWithYtDlp=async()=>({transcript:'[00:00:01] 안녕하세요',language:'ko',kind:'manual'});
+const beforeCaption=calls.length;
+const captioned=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:600});
+assert.equal(captioned.source,'yt-dlp');
+assert.equal(captioned.segmentation,'captions');
+assert.equal(captioned.status,'completed');
+assert.ok(captioned.transcript.includes('안녕하세요'));
+assert.equal(calls.length,beforeCaption);
+const restored=await getGeminiTranscriptionJob(captioned.jobToken);
+assert.equal(restored.transcript,captioned.transcript);
+
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','Gemini Files native time-window clips','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry with one model','Gemini Files native clipping','queued background handling','INTERNAL provider retry','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 preserves active interaction','YouTube submitted once','async caption-first bypasses Gemini','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
