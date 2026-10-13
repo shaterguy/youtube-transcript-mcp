@@ -13,7 +13,7 @@ import {
 
 export type StartTranscriptionArgs = Parameters<typeof startGeminiTranscriptionJob>[0];
 
-type Phase = "starting" | "active" | "polling" | "completed" | "failed" | "unknown";
+type Phase = "starting" | "active" | "polling" | "submitting" | "completed" | "failed" | "unknown";
 type StoredJob = {
   version: 2;
   phase: Phase;
@@ -122,7 +122,7 @@ async function load(config:StoreConfig,id:string): Promise<{raw:string;record:St
   if (typeof raw!=="string") throw new Error("Invalid durable job store payload.");
   let record:StoredJob;
   try { record=JSON.parse(raw) as StoredJob; } catch { throw new Error("Corrupted durable job store payload."); }
-  if (record.version!==2 || !record.owner || !["starting","active","polling","completed","failed","unknown"].includes(record.phase)) {
+  if (record.version!==2 || !record.owner || !["starting","active","polling","submitting","completed","failed","unknown"].includes(record.phase)) {
     throw new Error("Invalid durable job record.");
   }
   return {raw,record};
@@ -172,11 +172,17 @@ function toPublic(config:StoreConfig,id:string,record:StoredJob):TranscriptionJo
 async function readPublic(config:StoreConfig,id:string):Promise<TranscriptionJobResult> {
   let loaded=await load(config,id);
   if(!loaded) throw new Error("Durable transcription job missing or expired; original interaction cannot be safely resubmitted.");
-  if (["starting","polling"].includes(loaded.record.phase) &&
-      Date.now()-loaded.record.updatedAt>UNCERTAIN_OWNER_AFTER_MS) {
-    const next:StoredJob={...loaded.record,phase:"unknown",updatedAt:Date.now(),
-      error:"Worker disappeared during a potentially submitted Gemini request. Provider interaction ID may be unknown; automatic duplicate submission is prohibited."};
-    await saveIfUnchanged(config,id,loaded.raw,next);
+  if (Date.now()-loaded.record.updatedAt>UNCERTAIN_OWNER_AFTER_MS) {
+    if (loaded.record.phase==="polling") {
+      // Normal Gemini GETs are safe to repeat. Retry POSTs first enter
+      // the durably persisted submitting phase, which cannot be reclaimed.
+      const next:StoredJob={...loaded.record,phase:"active",updatedAt:Date.now()};
+      await saveIfUnchanged(config,id,loaded.raw,next);
+    } else if (["starting","submitting"].includes(loaded.record.phase)) {
+      const next:StoredJob={...loaded.record,phase:"unknown",updatedAt:Date.now(),
+        error:"Worker disappeared during a potentially submitted Gemini request. Provider interaction ID may be unknown; automatic duplicate submission is prohibited."};
+      await saveIfUnchanged(config,id,loaded.raw,next);
+    }
     loaded=await load(config,id);
     if (!loaded) throw new Error("Durable job expired during read.");
   }
@@ -231,14 +237,33 @@ export async function getPersistentTranscriptionJob(jobToken:string):Promise<Tra
     const current=await load(config,id);
     if(!current || current.raw!==JSON.stringify(claimed)) return readPublic(config,id);
   }
+  const beforeNewPost=async()=>{
+    const latest=await load(config,id);
+    if(!latest || latest.record.owner!==owner || latest.record.phase!=="polling")
+      throw new Error("Durable poll ownership changed before Gemini retry POST.");
+    const pending:StoredJob={...latest.record,phase:"submitting",updatedAt:Date.now()};
+    if(!await saveIfUnchanged(config,id,latest.raw,pending))
+      throw new Error("Could not reserve durable Gemini retry POST.");
+  };
+  const afterNewPost=async(legacyToken:string)=>{
+    const latest=await load(config,id);
+    if(!latest || latest.record.owner!==owner || latest.record.phase!=="submitting" || !latest.record.result)
+      throw new Error("Gemini POST outcome cannot be safely committed.");
+    const next:StoredJob={...latest.record,phase:"polling",updatedAt:Date.now(),
+      result:{...latest.record.result,jobToken:legacyToken}};
+    if(!await saveIfUnchanged(config,id,latest.raw,next))
+      throw new Error("Could not durably save Gemini retry interaction ID.");
+  };
   try {
-    const result=await getGeminiTranscriptionJob(loaded.record.result.jobToken);
+    const result=await getGeminiTranscriptionJob(loaded.record.result.jobToken,{
+      beforeNewPost,afterNewPost
+    });
     await storeResult(config,id,owner,result);
   } catch (error) {
     // Poll may have included a provider-level retry POST; it is unsafe to
     // restore the previous token after losing the outcome.
     const observed=await load(config,id);
-    if(observed && observed.record.owner===owner && observed.record.phase==="polling") {
+    if(observed && observed.record.owner===owner && ["polling","submitting"].includes(observed.record.phase)) {
       await saveIfUnchanged(config,id,observed.raw,{...observed.record,phase:"unknown",updatedAt:Date.now(),
         error:`Worker interrupted while polling or retrying provider: ${redact(error)}. No automatic duplicate POST.`});
     }
