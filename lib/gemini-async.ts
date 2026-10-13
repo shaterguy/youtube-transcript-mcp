@@ -408,14 +408,24 @@ function providerFailure(interaction:Record<string,unknown>):string {
   const e=interaction.error??interaction.errors??interaction.status;
   return safeMessage(typeof e==="string" ? e : JSON.stringify(e));
 }
-export async function getGeminiTranscriptionJob(jobToken:string):Promise<TranscriptionJobResult>{
+export async function getGeminiTranscriptionJob(
+  jobToken:string,
+  hooks?:{beforeNewPost?:()=>Promise<void>;afterNewPost?:(token:string)=>Promise<void>}
+):Promise<TranscriptionJobResult>{
   const job=decodeJob(jobToken);
   if(job.captionZ) return makeView(job,["completed"],[restoreTranscript(job.captionZ)]);
   getApiKey();
   const statuses:Array<JobStatus|"queued">=Array.from({length:job.segments.length},()=>"queued");
   const texts:string[]=Array.from({length:job.segments.length},()=>"");
+  // Persist a retry POST reservation and its resulting ID before any later POST.
+  // Durable retries are serial; normal status GETs remain safely repeatable.
+  const retryPost=async(segment:SegmentState)=>{
+    if(hooks?.beforeNewPost) await hooks.beforeNewPost();
+    await createInteraction(job,segment);
+    if(hooks?.afterNewPost) await hooks.afterNewPost(encodeJob(job));
+  };
   let cursor=0;
-  await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
+  await Promise.all(Array.from({length:Math.min(hooks?1:MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
     while(cursor<job.segments.length){
       const i=cursor++;
       const segment=job.segments[i];
@@ -433,7 +443,7 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         if(segment.attempts<3){
           // A previous initiation failed; retry when the client presents its latest token.
           if(segment.attempts>0 && segment.modelIndex<MODELS.length-1) segment.modelIndex++;
-          await createInteraction(job,segment);
+          await retryPost(segment);
         }
         statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
         continue;
@@ -469,7 +479,7 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
             segment.interactionId=null;
             delete segment.read429Count;
             delete segment.nextStatusCheckAt;
-            await createInteraction(job,segment);
+            await retryPost(segment);
             statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
           } else statuses[i]="failed";
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
