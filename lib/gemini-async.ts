@@ -20,6 +20,9 @@ const MAX_SIMULTANEOUS_STARTS = 2;
 const CLIP_OVERLAP_SECONDS = 3;
 const RETRY_DELAYS_MS = [1000, 3000, 7000];
 
+// A POST may have created a remote interaction even when its reply was lost.
+class AmbiguousSubmissionError extends Error {}
+
 export type JobStatus = "in_progress" | "completed" | "failed";
 export type SegmentState = {
   startSeconds: number;
@@ -32,6 +35,8 @@ export type SegmentState = {
   // The signed token is integrity-protected, not encrypted.
   transcriptZ?: string;
   read429Count?: number;
+  // Never resubmit after a POST with an indeterminate provider outcome.
+  submissionUnknown?: boolean;
   nextStatusCheckAt?: number;
 };
 type JobState = {
@@ -122,6 +127,7 @@ function decodeJob(token: string): JobState {
         !Number.isInteger(s.modelIndex) || s.modelIndex < 0 || s.modelIndex >= MODELS.length ||
         !Number.isInteger(s.attempts) || s.attempts < 0 || s.attempts > 20 ||
         (s.interactionId !== null && !/^v1_[a-zA-Z0-9_-]+$/.test(s.interactionId)) ||
+        (s.submissionUnknown !== undefined && (typeof s.submissionUnknown !== "boolean" || (s.submissionUnknown && (s.interactionId !== null || s.attempts < 1)))) ||
         (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))) ||
         (s.read429Count !== undefined && (!Number.isInteger(s.read429Count) || s.read429Count < 0 || s.read429Count > 20)) ||
         (s.nextStatusCheckAt !== undefined && (!Number.isFinite(s.nextStatusCheckAt) || s.nextStatusCheckAt < 0 || s.nextStatusCheckAt > state.createdAt + TOKEN_VALID_MS)))) {
@@ -182,6 +188,10 @@ async function requestGemini(
       const detail = (json.error && typeof json.error === "object"
         ? (json.error as {message?: unknown}).message : undefined) ?? `HTTP ${response.status}`;
       lastError = new Error(`HTTP ${response.status}: ${safeMessage(detail)}`);
+      // 408/5xx may be emitted after a server accepted the POST.
+      if (method === "POST" && [408, 500, 502, 503, 504].includes(response.status)) {
+        throw new AmbiguousSubmissionError(lastError.message);
+      }
       if (!isRetryableStatus(response.status) || attempt === RETRY_DELAYS_MS.length) break;
       // Polling too early during a free-tier minute-wide 429 window only makes it worse.
       // Keep the interaction ID and let the caller poll again after the indicated delay.
@@ -189,8 +199,10 @@ async function requestGemini(
       const retryAfter = parseRetryAfter(response.headers) ?? parseRetryFromMessage(detail);
       await new Promise((resolve) => setTimeout(resolve, retryAfter ?? RETRY_DELAYS_MS[attempt]));
     } catch (err) {
+      if (err instanceof AmbiguousSubmissionError) throw err;
       lastError = new Error(`Gemini ${method} request failed: ${safeMessage(err instanceof Error ? err.message : err)}`);
-      if (attempt === RETRY_DELAYS_MS.length || method === "POST") break;
+      if (method === "POST") throw new AmbiguousSubmissionError(lastError.message);
+      if (attempt === RETRY_DELAYS_MS.length) break;
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
     } finally {
       clearTimeout(deadline);
@@ -239,11 +251,13 @@ async function createInteraction(job: JobState, segment: SegmentState): Promise<
       input: [ video, { type: "text", text: segmentPrompt(segment, job.language) } ],
     });
     if (typeof response.id !== "string" || !/^v1_[a-zA-Z0-9_-]+$/.test(response.id)) {
-      throw new Error(`Gemini returned no valid interaction ID (${safeMessage(response.status)}).`);
+      throw new AmbiguousSubmissionError(`Gemini returned no valid interaction ID (${safeMessage(response.status)}).`);
     }
     segment.interactionId = response.id;
+    delete segment.submissionUnknown;
     delete segment.lastError;
   } catch (error) {
+    if (error instanceof AmbiguousSubmissionError) segment.submissionUnknown=true;
     segment.lastError = safeMessage(error instanceof Error ? error.message : error);
   }
 }
@@ -375,7 +389,7 @@ export async function startGeminiTranscriptionJob(args: {
   await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
     while(cursor<job.segments.length){const idx=cursor++;await createInteraction(job,job.segments[idx]);}
   }));
-  const statuses=job.segments.map(s=>s.interactionId?"in_progress" as const:"queued" as const);
+  const statuses=job.segments.map(s=>s.interactionId?"in_progress" as const:s.submissionUnknown?"failed" as const:"queued" as const);
   return makeView(job,statuses);
 }
 
@@ -411,6 +425,11 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
         continue;
       }
       if(!segment.interactionId){
+        if(segment.submissionUnknown){
+          // No interaction ID is available; retrying may duplicate a charged job.
+          statuses[i]="failed";
+          continue;
+        }
         if(segment.attempts<3){
           // A previous initiation failed; retry when the client presents its latest token.
           if(segment.attempts>0 && segment.modelIndex<MODELS.length-1) segment.modelIndex++;

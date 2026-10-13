@@ -20,7 +20,7 @@ global.fetch=async (uri,opts={})=>{
   const fn=queue.shift();return typeof fn==='function'?fn(uri,opts):fn;
 };
 let n=0;
-queue=[reply({error:{message:'temporary high demand'}},503),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'})];
+queue=[reply({error:{message:'Rate limit exceeded. Please retry in 0s'}},429),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'}),reply({id:'v1_mock'+(++n),status:'in_progress'})];
 const started=await startGeminiTranscriptionJob({url:'https://youtu.be/G-8cDsHLrD0',language:'ko-KR',durationSeconds:520,chunkSeconds:240,geminiFileUri:GEMINI_FILE});
 assert.equal(started.totalSegments,3);assert.equal(started.segmentation,'file-clips');
 assert.equal(started.status,'in_progress');assert.equal(started.segments.every(x=>x.attempts===1),true);
@@ -126,6 +126,36 @@ queue=[
 ];
 const recoveredPost429=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 assert.equal(recoveredPost429.status,'in_progress');
+
+// An ambiguous POST failure must not be automatically replayed on a new poll.
+const beforeAmbiguous=calls.filter(x=>x.method==='POST').length;
+queue=[reply({error:{message:'upstream overloaded'}},503)];
+const uncertain=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+assert.equal(uncertain.status,'failed');
+assert.match(uncertain.segments[0].error,/HTTP 503/);
+assert.equal(calls.filter(x=>x.method==='POST').length-beforeAmbiguous,1);
+queue=[];
+const uncertainPoll=await getGeminiTranscriptionJob(uncertain.jobToken);
+assert.equal(uncertainPoll.status,'failed');
+assert.equal(calls.filter(x=>x.method==='POST').length-beforeAmbiguous,1);
+
+const beforeLostReply=calls.filter(x=>x.method==='POST').length;
+queue=[()=>{throw new Error('Connection closed after request was sent');}];
+const lostReply=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+assert.equal(lostReply.status,'failed');
+assert.match(lostReply.segments[0].error,/Connection closed/);
+queue=[];
+assert.equal((await getGeminiTranscriptionJob(lostReply.jobToken)).status,'failed');
+assert.equal(calls.filter(x=>x.method==='POST').length-beforeLostReply,1);
+
+// A successful POST without an interaction ID is likewise indeterminate.
+const beforeMissingId=calls.filter(x=>x.method==='POST').length;
+queue=[reply({status:'in_progress'})];
+const missingId=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+assert.equal(missingId.status,'failed');
+queue=[];
+assert.equal((await getGeminiTranscriptionJob(missingId.jobToken)).status,'failed');
+assert.equal(calls.filter(x=>x.method==='POST').length-beforeMissingId,1);
 
 // A persistent GET 429 is throttled, then rerouted to the next model
 // after a second independent status read; no completed clip is discarded.

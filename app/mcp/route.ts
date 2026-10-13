@@ -154,7 +154,7 @@ const handler = createMcpHandler(
           "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
           "returns a signed jobToken immediately and transcribes known-duration videos in overlapping time windows.",
           "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
-          "Optional Gemini Files API URI enables actual clipped media windows. Supports 429/503/5xx retry.",
+          "Optional Gemini Files API URI enables actual clipped media windows. Retries confirmed 429 or failed interactions, never replays an ambiguous POST.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
           "be verified, the full video is submitted asynchronously as one job (segmentation=whole-video).",
           "Always follow up by calling get_youtube_transcript_job with the latest returned jobToken",
