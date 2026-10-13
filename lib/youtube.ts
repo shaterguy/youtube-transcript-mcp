@@ -2,10 +2,10 @@ import {
   GeminiTranscriptError,
   transcribeYouTubeWithGemini,
 } from "./gemini";
+import { getYouTubeCaptionsWithYtDlp, YtDlpCaptionError } from "./yt-dlp";
 
 const YOUTUBE_URL_PATTERN = /(?<![A-Za-z0-9.-])(?:https?:\/\/)?(?:(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?(?:[^\s#]*?&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])/i;
 const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
-const DEFUDDLE_TIMEOUT_MS = 2_000;
 
 function extractUsableTranscriptBody(transcript: string): string {
   const lines = transcript.replace(/\r\n/g, "\n").split("\n");
@@ -47,7 +47,7 @@ function assertUsablePublicTranscript(transcript: string): void {
   }
 }
 
-export type TranscriptSource = "defuddle" | "gemini";
+export type TranscriptSource = "yt-dlp" | "gemini";
 
 export type TranscriptResult = {
   videoId: string;
@@ -79,61 +79,6 @@ export function extractYouTubeVideoId(input: string): string {
   return match[1];
 }
 
-async function fetchFromDefuddle(
-  videoId: string,
-  language: string
-): Promise<string> {
-  const sourceUrl = `https://defuddle.md/youtube.com/watch?v=${videoId}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFUDDLE_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(sourceUrl, {
-      method: "GET",
-      cache: "no-store",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        Accept: "text/markdown, text/plain;q=0.9, */*;q=0.1",
-        "Accept-Language": language,
-        "User-Agent": "YouTubeTranscriptMCP/0.3 (Vercel)",
-      },
-    });
-
-    if (!response.ok) {
-      throw new TranscriptError(
-        `Public-caption provider returned HTTP ${response.status}.`,
-        response.status
-      );
-    }
-
-    const transcript = (await response.text()).replace(/\r\n/g, "\n").trim();
-    if (!transcript) {
-      throw new TranscriptError(
-        "The public-caption provider returned an empty transcript."
-      );
-    }
-    assertUsablePublicTranscript(transcript);
-    return transcript;
-  } catch (error) {
-    if (error instanceof TranscriptError) {
-      throw error;
-    }
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new TranscriptError(
-        "The public-caption provider timed out after 2 seconds."
-      );
-    }
-    throw new TranscriptError(
-      error instanceof Error
-        ? `Public-caption retrieval failed: ${error.message}`
-        : "Public-caption retrieval failed for an unknown reason."
-    );
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 export async function fetchYouTubeTranscript(
   input: string,
   language = "ko-KR"
@@ -142,14 +87,21 @@ export async function fetchYouTubeTranscript(
   const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   try {
-    const transcript = await fetchFromDefuddle(videoId, language);
+    const captions = await getYouTubeCaptionsWithYtDlp(videoId, language);
     return {
       videoId,
       canonicalUrl,
-      source: "defuddle",
-      transcript,
+      source: "yt-dlp",
+      transcript: captions.transcript,
     };
   } catch (publicCaptionError) {
+    // Transport or deployment failure does not establish absent captions.
+    if (!(publicCaptionError instanceof YtDlpCaptionError) ||
+        !["no_captions", "invalid_captions"].includes(publicCaptionError.reason)) {
+      throw new TranscriptError(
+        publicCaptionError instanceof Error ? publicCaptionError.message : "Could not check captions."
+      );
+    }
     try {
       const transcript = await transcribeYouTubeWithGemini(canonicalUrl);
       return {

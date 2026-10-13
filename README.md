@@ -31,3 +31,11 @@ Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오�
 - `YOUTUBE_TRANSCRIPT_JOB_SIGNING_KEY` — 선택, 토큰 서명 전용 키. 미설정 시 Gemini API 키로 서명합니다.
 
 `npm run type-check`, `npm run test:async`, `npm run build`로 검증합니다. 테스트는 실제 Gemini API 호출을 하지 않습니다.
+
+
+## Caption engine (yt-dlp)
+- Both cloud and Termux use the same source: manually uploaded captions first, then YouTube automatic captions if manual captions are absent in the original/requested language.
+- yt-dlp only fetches metadata and timed VTT/SRT subtitle files with --skip-download and --ignore-config; video and audio streams are never downloaded.
+- The Termux runtime executes python3 -m yt_dlp; a cloud runtime must provision a supported yt-dlp binary and set YT_DLP_BIN to its executable path.
+- Gemini fallback is used only when no usable timed public subtitles are found; network errors or missing yt-dlp execution capability do not prove that captions are absent.
+- Model for direct and Interactions API transcription: gemini-3.6-flash. The async job token retains segment IDs and completed speech; repeated GET 429 does not create a new provider job.

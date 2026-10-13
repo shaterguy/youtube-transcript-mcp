@@ -5,7 +5,7 @@ import {
   type TranscriptResult,
 } from "./youtube";
 
-export const TRANSCRIPT_CACHE_VERSION = "v2";
+export const TRANSCRIPT_CACHE_VERSION = "v3";
 
 export type CachedTranscriptResult = TranscriptResult & {
   cacheProvider: "vercel-data-cache";

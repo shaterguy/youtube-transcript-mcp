@@ -9,8 +9,8 @@ import { extractYouTubeVideoId } from "./youtube";
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const API_REVISION = "2026-05-20";
-const MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"] as const;
-const TOKEN_VALID_MS = 7 * 24 * 60 * 60 * 1000;
+const MODELS = ["gemini-3.6-flash"] as const;
+const TOKEN_VALID_MS = 180 * 24 * 60 * 60 * 1000;
 const MAX_SIGNED_JOB_TOKEN_LENGTH = 128_000;
 const MAX_COMPRESSED_SEGMENT_CHARS = 48_000;
 const MAX_DECOMPRESSED_SEGMENT_BYTES = 160_000;
@@ -186,7 +186,7 @@ async function requestGemini(
       await new Promise((resolve) => setTimeout(resolve, retryAfter ?? RETRY_DELAYS_MS[attempt]));
     } catch (err) {
       lastError = new Error(`Gemini ${method} request failed: ${safeMessage(err instanceof Error ? err.message : err)}`);
-      if (attempt === RETRY_DELAYS_MS.length) break;
+      if (attempt === RETRY_DELAYS_MS.length || method === "POST") break;
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
     } finally {
       clearTimeout(deadline);
@@ -443,15 +443,6 @@ export async function getGeminiTranscriptionJob(jobToken:string):Promise<Transcr
           // Keep all already cached segments and the overall request's identity.
           const already429=/^HTTP 429:/.test(segment.lastError ?? "");
           segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
-          if(segment.read429Count>=2 && segment.attempts<3 && segment.modelIndex<MODELS.length-1){
-            segment.modelIndex++;
-            segment.interactionId=null;
-            delete segment.read429Count;
-            delete segment.nextStatusCheckAt;
-            await createInteraction(job,segment);
-            statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
-            continue;
-          }
           const delay=parseRetryFromMessage(message) ?? 30_000;
           segment.nextStatusCheckAt=Date.now()+Math.max(1_000,delay);
         }

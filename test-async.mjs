@@ -79,7 +79,7 @@ queue=[reply({id:'v1_recover1',status:'in_progress'})];
 const recover=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:100});
 queue=[reply({status:'failed',error:{code:503,message:'503 high demand'}}),reply({id:'v1_recover2',status:'in_progress'})];
 const retry=await getGeminiTranscriptionJob(recover.jobToken);
-assert.equal(retry.status,'in_progress');assert.equal(retry.segments[0].modelIndex,1);
+assert.equal(retry.status,'in_progress');assert.equal(retry.segments[0].modelIndex,0);
 assert.notEqual(retry.jobToken,recover.jobToken);
 queue=[reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:00:01] 화자: 성공'}]}]})];
 const ready=await getGeminiTranscriptionJob(retry.jobToken);
@@ -103,7 +103,7 @@ queue=[
 ];
 const recoveredInternal=await getGeminiTranscriptionJob(internal.jobToken);
 assert.equal(recoveredInternal.status,'in_progress');
-assert.equal(recoveredInternal.segments[0].modelIndex,1);
+assert.equal(recoveredInternal.segments[0].modelIndex,0);
 assert.notEqual(recoveredInternal.jobToken,internal.jobToken);
 
 // A Free Tier GET 429 must not hammer the provider with immediate retries.
@@ -142,14 +142,14 @@ let quotaSecond;
 Date.now=()=>advanceNow()+30_000;
 try{
   queue=[
-    reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429),
-    reply({id:'v1_get429_fallback_2',status:'in_progress'})
+    reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429)
   ];
   quotaSecond=await getGeminiTranscriptionJob(quotaCooling.jobToken);
 } finally {Date.now=advanceNow;}
 assert.equal(quotaSecond.status,'in_progress');
-assert.equal(quotaSecond.segments[0].modelIndex,1);
-assert.equal(quotaSecond.segments[0].attempts,2);
+assert.equal(quotaSecond.segments[0].modelIndex,0);
+assert.equal(quotaSecond.segments[0].attempts,1);
+assert.equal(calls.at(-1).method,'GET');
 assert.notEqual(quotaSecond.jobToken,quotaFirst.jobToken);
 
 // When a provider starts answering status GETs again, stale 429 is removed.
@@ -175,4 +175,4 @@ assert.equal(fileJob.segmentation,'file-clips');
 assert.deepEqual(calls.at(-1).payload.input[0].processing,{type:'static',start_offset:'0s',end_offset:'60s'});
 assert.equal(calls.at(-1).payload.input[0].mime_type,'video/mp4');
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry + model fallback','Gemini Files native clipping','queued background handling','INTERNAL provider failover','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 model fallback','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','YouTube time-window scopes','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry with one model','Gemini Files native clipping','queued background handling','INTERNAL provider retry','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 preserves active interaction','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));

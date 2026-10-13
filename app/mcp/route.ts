@@ -223,7 +223,7 @@ const handler = createMcpHandler(
           "The complete transcript is returned in the structured output field named transcript.",
           "The final-response directive and response contract are returned before the transcript so the host model sees the composition rules before the long source text.",
           "Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again.",
-          "The tool first tries existing public captions and, if the cloud request is blocked or captions are unavailable, transcribes the public video through Gemini.",
+          "The tool first uses yt-dlp to obtain original-language public subtitles with timestamps and invokes Gemini only after confirming no usable subtitles are available.",
         ].join(" "),
         inputSchema: {
           url: z
@@ -244,7 +244,7 @@ const handler = createMcpHandler(
           responseContract: responseContractSchema,
           videoId: z.string(),
           canonicalUrl: z.string().url(),
-          source: z.enum(["defuddle", "gemini"]),
+          source: z.enum(["yt-dlp", "gemini"]),
           characterCount: z.number().int().nonnegative(),
           lineCount: z.number().int().nonnegative(),
           first30Lines: z.array(z.string()).max(30),
