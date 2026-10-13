@@ -7,7 +7,7 @@
     "build": "node scripts/prepare-yt-dlp.mjs && next build",
     "start": "next start",
     "type-check": "tsc --noEmit",
-    "test:async": "tsc --target ES2022 --module CommonJS --moduleResolution node --esModuleInterop --skipLibCheck --outDir test-output --rootDir lib lib/gemini-async.ts lib/youtube.ts lib/gemini.ts && node test-async.mjs"
+    "test:async": "tsc --target ES2022 --module CommonJS --moduleResolution node --esModuleInterop --skipLibCheck --outDir test-output --rootDir lib lib/job-store.ts lib/gemini-async.ts lib/youtube.ts lib/gemini.ts && node test-async.mjs && node test-persistent.mjs"
   },
   "dependencies": {
     "mcp-handler": "2.0.1",

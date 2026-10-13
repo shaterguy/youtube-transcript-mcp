@@ -6,7 +6,7 @@ import {
   TRANSCRIPT_CACHE_VERSION,
 } from "../../lib/transcript-cache";
 import { TranscriptError } from "../../lib/youtube";
-import { startGeminiTranscriptionJob, getGeminiTranscriptionJob } from "../../lib/gemini-async";
+import { startPersistentTranscriptionJob, getPersistentTranscriptionJob } from "../../lib/job-store";
 import {
   YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
   YOUTUBE_RESPONSE_CONTRACT,
@@ -152,7 +152,7 @@ const handler = createMcpHandler(
         title: "Start resilient Gemini background transcription with explicit time scopes",
         description: [
           "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
-          "returns a signed jobToken immediately and transcribes known-duration videos in overlapping time windows.",
+          "returns a durable jobToken immediately and transcribes known-duration videos in overlapping time windows.",
           "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
           "Optional Gemini Files API URI enables actual clipped media windows. Retries confirmed 429 or failed interactions, never replays an ambiguous POST.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
@@ -178,7 +178,7 @@ const handler = createMcpHandler(
       },
       async (args) => {
         try {
-          const result = await startGeminiTranscriptionJob(args);
+          const result = await startPersistentTranscriptionJob(args);
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start transcription job." }] };
@@ -193,7 +193,7 @@ const handler = createMcpHandler(
         description: [
           "Poll Gemini server-side interaction status, automatically recover from transient 429/503",
           "failures with backoff/model fallback, and combine clips only when ALL segments completed.",
-          "Pass the most recently returned jobToken on every poll: retries change the signed token.",
+          "Pass the durable jobToken on every poll; the store recovers the latest state across workers.",
           "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
         ].join(" "),
         inputSchema: { jobToken: z.string().min(1).max(128000) },
@@ -207,7 +207,7 @@ const handler = createMcpHandler(
       },
       async ({ jobToken }) => {
         try {
-          const result = await getGeminiTranscriptionJob(jobToken);
+          const result = await getPersistentTranscriptionJob(jobToken);
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not poll transcription job." }] };
