@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Asynchronous transcript mock test output
 test-output/
+
+# yt-dlp executable is fetched with a pinned checksum only in Vercel builds.
+/vendor/yt-dlp_linux

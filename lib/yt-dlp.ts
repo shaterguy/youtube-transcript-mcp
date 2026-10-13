@@ -21,9 +21,13 @@ export class YtDlpCaptionError extends Error {
   }
 }
 
-function executor(): { binary: string; prefix: string[] } {
+export function executor(): { binary: string; prefix: string[] } {
   const configured = process.env.YT_DLP_BIN?.trim();
   if (configured) return { binary: configured, prefix: [] };
+  // The verified Linux asset is traced into the /mcp serverless function.
+  if (process.env.VERCEL === "1") {
+    return { binary: path.join(process.cwd(), "vendor", "yt-dlp_linux"), prefix: [] };
+  }
   if ((process.env.PREFIX || "").includes("/com.termux/")) {
     return { binary: "python3", prefix: ["-m", "yt_dlp"] };
   }
@@ -42,7 +46,8 @@ async function runYtDlp(args: string[], timeoutMs = 55000): Promise<string> {
       "LD_PRELOAD","ANDROID_ROOT","ANDROID_DATA"]) {
       if (process.env[name] !== undefined) runtimeEnv[name] = process.env[name];
     }
-    const child = spawn(binary, [...prefix, "--ignore-config", "--no-playlist", "--no-warnings", ...args], {
+    const child = spawn(binary, [...prefix, "--ignore-config", "--no-playlist", "--no-warnings", "--no-cache-dir",
+      ...(process.env.VERCEL === "1" ? ["--js-runtimes", "node"] : []), ...args], {
       shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       env: runtimeEnv,
     });

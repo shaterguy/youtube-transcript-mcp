@@ -4,6 +4,18 @@ const require=createRequire(import.meta.url);
 const {startGeminiTranscriptionJob,getGeminiTranscriptionJob}=require('./test-output/gemini-async.js');
 process.env.GEMINI_API_KEY='test-key-do-not-use';
 const ytDlp=require('./test-output/yt-dlp.js');
+// The cloud executable must not depend on a globally installed yt-dlp CLI.
+import path from 'node:path';
+const savedVercel=process.env.VERCEL;
+const savedBinary=process.env.YT_DLP_BIN;
+process.env.VERCEL='1';
+delete process.env.YT_DLP_BIN;
+assert.equal(ytDlp.executor().binary,path.join(process.cwd(),'vendor','yt-dlp_linux'));
+assert.deepEqual(ytDlp.executor().prefix,[]);
+process.env.YT_DLP_BIN='/fixtures/yt-dlp';
+assert.equal(ytDlp.executor().binary,'/fixtures/yt-dlp');
+if(savedVercel===undefined)delete process.env.VERCEL;else process.env.VERCEL=savedVercel;
+if(savedBinary===undefined)delete process.env.YT_DLP_BIN;else process.env.YT_DLP_BIN=savedBinary;
 ytDlp.getYouTubeCaptionsWithYtDlp=async()=>{throw new ytDlp.YtDlpCaptionError('No captions in fixture','no_captions');};
 const GEMINI_FILE='https://generativelanguage.googleapis.com/v1beta/files/abc123';
 
