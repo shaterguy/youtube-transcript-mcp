@@ -94,10 +94,61 @@ assert.equal(providerPost,beforeUnknown,'a crashed POST must not be retried');
 const blocked=await getPersistentTranscriptionJob(quarantined.jobToken);
 assert.equal(blocked.status,'failed');
 
+// A stale GET-only poll has a known interaction ID: recover without new POST.
+const pollRecoveryParams={...params,url:'https://youtu.be/bdFgK45TuPA'};
+providerReplies=[{id:'v1_stalepoll',status:'in_progress'}];
+const recovering=await startPersistentTranscriptionJob(pollRecoveryParams);
+const recoveryKey='yt:transcript:job:v2:'+recovering.jobToken.split('.')[1];
+const staleRecord=JSON.parse(redisData.get(recoveryKey));
+redisData.set(recoveryKey,JSON.stringify({...staleRecord,phase:'polling',owner:'crashed-poller',updatedAt:Date.now()-21*60_000}));
+const postedBeforeRecovery=providerPost,gotBeforeRecovery=providerGet;
+const reclaimed=await getPersistentTranscriptionJob(recovering.jobToken);
+assert.equal(reclaimed.status,'in_progress');
+providerReplies=[{status:'in_progress'}];
+const resumedAfterCrash=await getPersistentTranscriptionJob(recovering.jobToken);
+assert.equal(resumedAfterCrash.status,'in_progress');
+assert.equal(providerGet,gotBeforeRecovery+1);
+assert.equal(providerPost,postedBeforeRecovery);
+
+// A retry POST is fenced durably before it enters the network.
+const retryParams={...params,url:'https://youtu.be/5LNRvdyzmrY'};
+providerReplies=[{id:'v1_retry_safe',status:'in_progress'}];
+const retryStart=await startPersistentTranscriptionJob(retryParams);
+const retryKey='yt:transcript:job:v2:'+retryStart.jobToken.split('.')[1];
+const originalFetch=global.fetch;
+let signalRetryPost,releaseRetryPost;
+const enteredRetryPost=new Promise(r=>{signalRetryPost=r;});
+const blockedRetryPost=new Promise(r=>{releaseRetryPost=r;});
+global.fetch=async (url,options={})=>{
+  if(String(url).includes('generativelanguage.googleapis.com') && options.method==='POST'){
+    providerPost++;
+    signalRetryPost();
+    await blockedRetryPost;
+    return response({id:'v1_post_completed_after_crash',status:'in_progress'});
+  }
+  return originalFetch(url,options);
+};
+providerReplies=[{status:'failed',error:{code:503,message:'503 retryable provider failure'}}];
+const pendingRetry=getPersistentTranscriptionJob(retryStart.jobToken);
+await enteredRetryPost;
+const beforeQuarantine=JSON.parse(redisData.get(retryKey));
+assert.equal(beforeQuarantine.phase,'submitting','retry POST fence persisted before submission');
+redisData.set(retryKey,JSON.stringify({...beforeQuarantine,updatedAt:Date.now()-21*60_000}));
+const forbiddenRepeat=await getPersistentTranscriptionJob(retryStart.jobToken);
+assert.equal(forbiddenRepeat.status,'failed');
+assert.match(forbiddenRepeat.error,/disappeared/);
+const postedAtQuarantine=providerPost;
+const duplicate=await getPersistentTranscriptionJob(retryStart.jobToken);
+assert.equal(duplicate.status,'failed');
+assert.equal(providerPost,postedAtQuarantine);
+releaseRetryPost();
+await pendingRetry.catch(()=>{});
+global.fetch=originalFetch;
+
 let invalid=false;
 try {await getPersistentTranscriptionJob(first.jobToken.slice(0,-5)+'xxxxx');} catch(e) {invalid=/signature/.test(e.message);}
 assert.equal(invalid,true);
 assert.ok(storedUpdates>=6);
 
-console.log(JSON.stringify({status:'PASS',cases:['atomic reservation dedup','cross-worker single poll lease','durable interaction ID resume','complete transcript persistence','unknown POST crash quarantine','tampered token rejection'],providerPost,providerGet,storedUpdates},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['atomic reservation dedup','cross-worker single poll lease','durable interaction ID resume','complete transcript persistence','unknown POST crash quarantine','stale GET recovery','durable POST fence','tampered token rejection'],providerPost,providerGet,storedUpdates},null,2));
 Object.assign(process.env,oldEnv);
