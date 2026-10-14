@@ -4,6 +4,10 @@ const require=createRequire(import.meta.url);
 const {startGeminiTranscriptionJob,getGeminiTranscriptionJob}=require('./test-output/gemini-async.js');
 process.env.GEMINI_API_KEY='test-key-do-not-use';
 const ytDlp=require('./test-output/yt-dlp.js');
+assert.equal(ytDlp.classifyYtDlpFailure('ERROR: Sign in to confirm you’re not a bot'), 'bot_challenge');
+assert.equal(ytDlp.classifyYtDlpFailure('ERROR: Video unavailable'), 'video_unavailable');
+assert.equal(ytDlp.classifyYtDlpFailure('ERROR: Private video'), 'video_unavailable');
+assert.equal(ytDlp.classifyYtDlpFailure('HTTP Error 429: Too Many Requests'), 'rate_limited');
 // The cloud executable must not depend on a globally installed yt-dlp CLI.
 import path from 'node:path';
 const savedVercel=process.env.VERCEL;

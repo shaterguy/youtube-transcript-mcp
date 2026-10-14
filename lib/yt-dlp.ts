@@ -34,6 +34,16 @@ export function executor(): { binary: string; prefix: string[] } {
   return { binary: "yt-dlp", prefix: [] };
 }
 
+// A YouTube bot challenge is an egress/access failure, not an unavailable
+// video. Keep it distinct so the Gemini fallback is not skipped.
+export function classifyYtDlpFailure(stderr: string): string {
+  const detail = stderr.toLowerCase();
+  return /sign in to confirm|not a bot/.test(detail) ? "bot_challenge" :
+    /private video|video unavailable|age-restricted/.test(detail) ? "video_unavailable" :
+    /http error 429|too many requests/.test(detail) ? "rate_limited" :
+    /timed out|network|unable to download|http error|certificate/.test(detail) ? "network" : "yt_dlp_error";
+}
+
 async function runYtDlp(args: string[], timeoutMs = 55000): Promise<string> {
   const { binary, prefix } = executor();
   return new Promise<string>((resolve, reject) => {
@@ -84,12 +94,9 @@ async function runYtDlp(args: string[], timeoutMs = 55000): Promise<string> {
       if (settled) return;
       settled = true;
       if (status === 0) return resolve(output);
-      const detail = errors.toLowerCase();
-      const reason =
-        /private video|video unavailable|sign in to confirm|age-restricted/.test(detail) ? "video_unavailable" :
-        /http error 429|too many requests/.test(detail) ? "rate_limited" :
-        /timed out|network|unable to download|http error|certificate/.test(detail) ? "network" : "yt_dlp_error";
-      reject(new YtDlpCaptionError(errors.slice(-700) || "yt-dlp failed.", reason));
+      reject(new YtDlpCaptionError(
+        errors.slice(-700) || "yt-dlp failed.", classifyYtDlpFailure(errors)
+      ));
     });
   });
 }
