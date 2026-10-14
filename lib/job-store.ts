@@ -1,9 +1,12 @@
 /**
- * Cross-instance persistent transcription jobs using Upstash Redis REST.
+ * Durable transcription jobs: local atomic file CAS on Termux, Redis REST on cloud.
  * All writes are atomic compare-and-set. A Gemini POST is never replayed after
  * a worker disappears mid-submission, even if its interaction ID was lost.
  */
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { extractYouTubeVideoId } from "./youtube";
 import {
   getGeminiTranscriptionJob,
@@ -39,8 +42,22 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
 return 1
 `;
 
-type StoreConfig = { url: string; token: string; key: string };
+type StoreConfig = { url: string; token: string; key: string; localDir?: string };
 function getConfig(): StoreConfig | null {
+  // The local TMCP must never depend on cloud Redis or additional credentials.
+  // Persist beside the Termux service, outside the repository and deployment.
+  const useLocal = process.env.YOUTUBE_TRANSCRIPT_JOB_BACKEND === "local" ||
+    (process.env.YOUTUBE_TRANSCRIPT_JOB_BACKEND !== "redis" &&
+     !(process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_REST_TOKEN) &&
+     (process.env.PREFIX || "").includes("/com.termux/"));
+  if (useLocal) {
+    const key = process.env.YOUTUBE_TRANSCRIPT_JOB_SIGNING_KEY?.trim() ||
+      process.env.GEMINI_API_KEY?.trim();
+    if (!key) throw new Error("A stable local Gemini/job signing key is required.");
+    const localDir = process.env.YOUTUBE_TRANSCRIPT_JOB_DIR?.trim() ||
+      path.join(os.homedir(), ".local", "state", "youtube-transcript-mcp", "jobs");
+    return {url:"", token:"", key, localDir};
+  }
   const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
   const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
   const key = process.env.YOUTUBE_TRANSCRIPT_JOB_SIGNING_KEY?.trim();
@@ -95,7 +112,67 @@ function redact(error: unknown): string {
   return String(error instanceof Error ? error.message : error)
     .replace(/AIza[\w-]+/g, "[REDACTED_KEY]").slice(0,500);
 }
+// A file is written fully before it becomes visible. SET NX is an atomic
+// hardlink; EVAL compare-and-set uses a short-lived exclusive directory lock.
+// An orphaned lock can be reclaimed without retrying any Gemini POST: the
+// persisted starting/submitting state is quarantined by the existing state
+// machine, while a stale GET-only poll can be resumed safely.
+async function localRedis<T>(config:StoreConfig, command:unknown[]):Promise<T> {
+  const dir=config.localDir!;
+  const operation=String(command[0]);
+  const key=String(operation==="EVAL"?command[3]:command[1]);
+  if(!/^yt:transcript:job:v2:[a-f0-9]{64}$/.test(key))
+    throw new Error("Invalid local durable job key.");
+  await fs.mkdir(dir,{recursive:true,mode:0o700});
+  const filename=path.join(dir,key+".json");
+  const read=async():Promise<string|null>=>{
+    try { return await fs.readFile(filename,"utf8"); }
+    catch(err){if((err as NodeJS.ErrnoException).code==="ENOENT")return null;throw err;}
+  };
+  if(operation==="GET") return await read() as T;
+  const tmp=filename+"."+randomUUID()+".tmp";
+  if(operation==="SET"){
+    if(!command.includes("NX")) throw new Error("Local durable SET requires NX.");
+    // Android app sandboxes can deny hardlinks. O_EXCL is supported by Termux.
+    // Persist the claim before Gemini can be called; a crash during the write
+    // leaves a quarantined, never-reused claim rather than a duplicate POST.
+    let handle;
+    try {handle=await fs.open(filename,"wx",0o600);}
+    catch(err){if((err as NodeJS.ErrnoException).code==="EEXIST")return null as T;throw err;}
+    try{
+      await handle.writeFile(String(command[2]),"utf8");
+      await handle.sync();
+    } finally {await handle.close();}
+    return "OK" as T;
+  }
+  if(operation!=="EVAL")throw new Error("Unsupported local durable storage command.");
+  const lock=filename+".lock";
+  let acquired=false;
+  for(let attempt=0;attempt<35;attempt++){
+    try {await fs.mkdir(lock,{mode:0o700});acquired=true;break;}
+    catch(err){
+      if((err as NodeJS.ErrnoException).code!=="EEXIST")throw err;
+      try{
+        const stat=await fs.stat(lock);
+        if(Date.now()-stat.mtimeMs>120_000)await fs.rmdir(lock).catch(()=>{});
+      }catch(other){if((other as NodeJS.ErrnoException).code!=="ENOENT")throw other;}
+      await new Promise(resolve=>setTimeout(resolve,50+attempt*5));
+    }
+  }
+  if(!acquired)throw new Error("Local durable job lock is currently busy.");
+  try{
+    const previous=await read();
+    if(previous!==String(command[4]))return 0 as T;
+    await fs.writeFile(tmp,String(command[5]),{encoding:"utf8",mode:0o600,flag:"wx"});
+    await fs.rename(tmp,filename);
+    return 1 as T;
+  }finally{
+    await fs.rm(tmp,{force:true});
+    await fs.rmdir(lock).catch(()=>{});
+  }
+}
 async function redis<T>(config:StoreConfig, command: unknown[]): Promise<T> {
+  if(config.localDir)return localRedis<T>(config,command);
   let lastError: Error | undefined;
   // EVAL CAS and SET NX are safe to repeat with the *same* arguments.
   for (let attempt=0;attempt<3;attempt++) {
