@@ -152,9 +152,9 @@ function decodeJob(token: string): JobState {
         (s.lastProviderStatus !== undefined && (typeof s.lastProviderStatus !== "string" || s.lastProviderStatus.length > 80)) ||
         (s.lastHttpStatus !== undefined && (!Number.isInteger(s.lastHttpStatus) || s.lastHttpStatus < 100 || s.lastHttpStatus > 599)) ||
         (s.lastCheckedAt !== undefined && (!Number.isFinite(s.lastCheckedAt) || s.lastCheckedAt < 0 || s.lastCheckedAt > state.createdAt + TOKEN_VALID_MS)) ||
-        (s.lastRetryAfterMs !== undefined && (!Number.isFinite(s.lastRetryAfterMs) || s.lastRetryAfterMs < 0 || s.lastRetryAfterMs > 60_000)) ||
+        (s.lastRetryAfterMs !== undefined && (!Number.isFinite(s.lastRetryAfterMs) || s.lastRetryAfterMs < 0 || !Number.isSafeInteger(s.lastRetryAfterMs))) ||
         (s.cooldownSkipped !== undefined && typeof s.cooldownSkipped !== "boolean") ||
-        (s.nextStatusCheckAt !== undefined && (!Number.isFinite(s.nextStatusCheckAt) || s.nextStatusCheckAt < 0 || s.nextStatusCheckAt > state.createdAt + TOKEN_VALID_MS)))) {
+        (s.nextStatusCheckAt !== undefined && (!Number.isFinite(s.nextStatusCheckAt) || s.nextStatusCheckAt < 0 || !Number.isSafeInteger(s.nextStatusCheckAt))))) {
     throw new Error("Malformed or expired transcription job token.");
   }
   return state;
@@ -165,13 +165,24 @@ function isRetryableStatus(code: number): boolean {
 function isRetryableError(message: string): boolean {
   return /\b(429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|INTERNAL|overloaded|high demand|rate limit|timeout|timed out)\b/i.test(message);
 }
+function validRetryDelay(ms: number): number | null {
+  // Preserve provider minimums without allowing timestamp/timer overflow.
+  return Number.isFinite(ms) && ms >= 0 && ms <= Number.MAX_SAFE_INTEGER - Date.now()
+    ? Math.ceil(ms) : null;
+}
+async function waitForRetry(ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(2_147_483_647, until - Date.now())));
+  }
+}
 function parseRetryAfter(headers: Headers): number | null {
   const raw = headers.get("Retry-After");
   if (!raw) return null;
   const n = Number(raw);
-  if (Number.isFinite(n) && n >= 0) return Math.min(60_000, n * 1000);
+  if (Number.isFinite(n) && n >= 0) return validRetryDelay(n * 1000);
   const date = Date.parse(raw);
-  return Number.isFinite(date) ? Math.max(0, Math.min(60_000, date - Date.now())) : null;
+  return Number.isFinite(date) ? validRetryDelay(Math.max(0, date - Date.now())) : null;
 }
 function parseRetryFromMessage(value: unknown): number | null {
   const text = String(value ?? "");
@@ -179,7 +190,7 @@ function parseRetryFromMessage(value: unknown): number | null {
   if (!match) return null;
   const n = Number(match[1]);
   if (!Number.isFinite(n) || n < 0) return null;
-  return Math.min(60_000, Math.round(n * (match[2].toLowerCase().startsWith("m") ? 60_000 : 1000)));
+  return validRetryDelay(n * (match[2].toLowerCase().startsWith("m") ? 60_000 : 1000));
 }
 function safeMessage(value: unknown): string {
   return String(value ?? "Unknown Gemini error").replace(/AIza[\w-]+/g, "[REDACTED_KEY]").slice(0, 500);
@@ -223,7 +234,7 @@ async function requestGemini(
       // Polling too early during a free-tier minute-wide 429 window only makes it worse.
       // Keep the interaction ID and let the caller poll again after the indicated delay.
       if (response.status === 429 && method === "GET") break;
-      await new Promise((resolve) => setTimeout(resolve, retryAfterMs ?? RETRY_DELAYS_MS[attempt]));
+      await waitForRetry(retryAfterMs ?? RETRY_DELAYS_MS[attempt]);
     } catch (err) {
       if (err instanceof AmbiguousSubmissionError) throw err;
       lastError = new Error(`Gemini ${method} request failed: ${safeMessage(err instanceof Error ? err.message : err)}`);
@@ -503,6 +514,8 @@ export async function getGeminiTranscriptionJob(
         segment.lastProviderStatus=state;
         segment.lastHttpStatus=200;
         segment.lastCheckedAt=Date.now();
+        delete segment.read429Count;
+        delete segment.nextStatusCheckAt;
         delete segment.lastReadError;
         delete segment.lastRetryAfterMs;
         delete segment.cooldownSkipped;
@@ -539,6 +552,9 @@ export async function getGeminiTranscriptionJob(
         const readError=err as Error & {httpStatus?:number;retryAfterMs?:number|null};
         segment.lastCheckedAt=Date.now();
         segment.lastReadError=message;
+        // This attempt did not observe a provider state. Do not attach an old
+        // successful status to the new lastCheckedAt timestamp.
+        delete segment.lastProviderStatus;
         segment.cooldownSkipped=false;
         if(readError.httpStatus!==undefined) segment.lastHttpStatus=readError.httpStatus;
         else delete segment.lastHttpStatus;
@@ -551,8 +567,13 @@ export async function getGeminiTranscriptionJob(
           // retry only after the provider cooldown, and do not submit duplicates.
           const already429=/^HTTP 429:/.test(segment.lastError ?? "");
           segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
-          const delay=readError.retryAfterMs ?? parseRetryFromMessage(message) ?? 30_000;
-          segment.nextStatusCheckAt=Date.now()+Math.max(1_000,delay);
+          const providerDelay=readError.retryAfterMs ?? parseRetryFromMessage(message) ?? 0;
+          const backoff=Math.min(30 * 60_000,30_000 * 2 ** (segment.read429Count-1));
+          const delay=Math.max(providerDelay,backoff);
+          const now=Date.now();
+          const jitter=Math.min(Math.floor(Math.random()*backoff*0.1),
+            Math.max(0,Number.MAX_SAFE_INTEGER-now-delay));
+          segment.nextStatusCheckAt=now+delay+jitter;
         }
         segment.lastError=message;
         // Other status-read timeouts likewise do not prove that the remote job failed.

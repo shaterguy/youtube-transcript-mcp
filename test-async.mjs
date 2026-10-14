@@ -241,7 +241,7 @@ assert.equal(quotaCooling.status,'in_progress');
 assert.equal(calls.length,beforeCooldownCall, 'GET during Retry-After cooldown');
 const advanceNow=Date.now;
 let quotaSecond;
-Date.now=()=>advanceNow()+30_000;
+Date.now=()=>quotaCooling.segments[0].nextStatusCheckAt;
 try{
   queue=[
     reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429)
@@ -261,7 +261,7 @@ queue=[reply({error:{message:'Rate limit exceeded. Please retry in 0s'}},429)];
 const firstBlocked=await getGeminiTranscriptionJob(recoveringStatus.jobToken);
 const advanceNow2=Date.now;
 let clearedError;
-Date.now=()=>advanceNow2()+2_000;
+Date.now=()=>firstBlocked.segments[0].nextStatusCheckAt;
 try{
   queue=[reply({status:'in_progress'})];
   clearedError=await getGeminiTranscriptionJob(firstBlocked.jobToken);

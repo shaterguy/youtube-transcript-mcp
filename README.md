@@ -39,3 +39,10 @@ Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오�
 - The Termux runtime executes python3 -m yt_dlp; a cloud runtime must provision a supported yt-dlp binary and set YT_DLP_BIN to its executable path.
 - Gemini fallback is used only when no usable timed public subtitles are found; network errors or missing yt-dlp execution capability do not prove that captions are absent.
 - Model for direct and Interactions API transcription: gemini-3.6-flash. The async job token retains segment IDs and completed speech; repeated GET 429 does not create a new provider job.
+
+
+## Termux status polling recovery (v0.3.6-dev1)
+- Use `get_youtube_transcript_job({jobToken, readOnly:true})` to inspect an accepted job without allowing another provider POST.
+- HTTP 429 is a status-read failure, not proof that the provider is still processing. Inspect `lastHttpStatus`, `lastReadError`, and `lastProviderStatus`; a failed latest read clears stale provider status.
+- Honor the full Retry-After minimum. Consecutive GET 429 adds exponential cooldown (30 seconds up to 30 minutes) plus nonnegative jitter; a longer provider minimum always wins. Successful GET resets the counter, and cooldown survives token/store restoration.
+- This change does not prove successful real transcription or resolve an external provider quota.
