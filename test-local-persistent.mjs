@@ -56,6 +56,23 @@ try{
   const resumed=await getPersistentTranscriptionJob(pending.jobToken);
   assert.equal(resumed.status,"completed");
   assert.equal(postCount,wasPosted,"safe GET resume must not POST");
+  // A persisted diagnostic read is GET-only and preserves a real provider action state.
+  replies=[{id:"v1_readonly_durable",status:"in_progress"}];
+  const checkJob=await startPersistentTranscriptionJob({...args,url:"https://youtu.be/abcdefghijk"});
+  const postBeforeDiagnostic=postCount;
+  const getBeforeDiagnostic=getCount;
+  replies=[{status:"requires_action"}];
+  const check=await getPersistentTranscriptionJob(checkJob.jobToken,{readOnly:true});
+  assert.equal(postCount,postBeforeDiagnostic,"GET-only persisted read cannot POST");
+  assert.equal(getCount,getBeforeDiagnostic+1);
+  assert.equal(check.status,"in_progress");
+  assert.equal(check.segments[0].status,"requires_action");
+  assert.equal(check.segments[0].lastProviderStatus,"requires_action");
+  assert.equal(check.segments[0].attempts,1);
+  const file3=(await readdir(dir)).filter(x=>x.endsWith(".json")&&![stateFiles[0],file2].includes(x))[0];
+  const finalRecord=JSON.parse(await readFile(path.join(dir,file3),"utf8"));
+  assert.equal(finalRecord.phase,"active");
+  assert.equal(finalRecord.result?.segments?.[0].lastProviderStatus,"requires_action");
   await assert.rejects(getPersistentTranscriptionJob(jobToken.slice(0,-4)+"zzzz"),/signature/);
   console.log(JSON.stringify({status:"PASS",checks:["atomic local claim and no duplicate POST","provider ID persisted in private JSON","completed output across requests","stale GET-only worker recovery","signed token tamper rejection"],postCount,getCount,dirMode:"private"}));
 }finally{await rm(dir,{recursive:true,force:true});}

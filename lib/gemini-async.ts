@@ -31,6 +31,12 @@ export type SegmentState = {
   modelIndex: number;
   attempts: number;
   lastError?: string;
+  lastReadError?: string;
+  lastProviderStatus?: string;
+  lastHttpStatus?: number;
+  lastCheckedAt?: number;
+  lastRetryAfterMs?: number;
+  cooldownSkipped?: boolean;
   // Compressed transcript allows safe resume without re-reading completed Gemini jobs.
   // The signed token is integrity-protected, not encrypted.
   transcriptZ?: string;
@@ -61,7 +67,19 @@ export type TranscriptionJobResult = {
   durationSeconds: number | null;
   completedSegments: number;
   totalSegments: number;
-  segments: Array<Pick<SegmentState, "startSeconds" | "endSeconds" | "modelIndex" | "attempts"> & { status: JobStatus | "queued"; model: string; error?: string }>;
+  segments: Array<Pick<SegmentState, "startSeconds" | "endSeconds" | "modelIndex" | "attempts"> & {
+    status: JobStatus | "queued" | "requires_action";
+    model: string;
+    error?: string;
+    lastReadError?: string;
+    lastProviderStatus?: string;
+    lastHttpStatus?: number;
+    lastCheckedAt?: number;
+    lastRetryAfterMs?: number;
+    nextStatusCheckAt?: number;
+    cooldownSkipped?: boolean;
+  }>;
+  readWarning?: string;
   transcript?: string;
   characterCount?: number;
   lineCount?: number;
@@ -130,6 +148,12 @@ function decodeJob(token: string): JobState {
         (s.submissionUnknown !== undefined && (typeof s.submissionUnknown !== "boolean" || (s.submissionUnknown && (s.interactionId !== null || s.attempts < 1)))) ||
         (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))) ||
         (s.read429Count !== undefined && (!Number.isInteger(s.read429Count) || s.read429Count < 0 || s.read429Count > 20)) ||
+        (s.lastReadError !== undefined && (typeof s.lastReadError !== "string" || s.lastReadError.length > 500)) ||
+        (s.lastProviderStatus !== undefined && (typeof s.lastProviderStatus !== "string" || s.lastProviderStatus.length > 80)) ||
+        (s.lastHttpStatus !== undefined && (!Number.isInteger(s.lastHttpStatus) || s.lastHttpStatus < 100 || s.lastHttpStatus > 599)) ||
+        (s.lastCheckedAt !== undefined && (!Number.isFinite(s.lastCheckedAt) || s.lastCheckedAt < 0 || s.lastCheckedAt > state.createdAt + TOKEN_VALID_MS)) ||
+        (s.lastRetryAfterMs !== undefined && (!Number.isFinite(s.lastRetryAfterMs) || s.lastRetryAfterMs < 0 || s.lastRetryAfterMs > 60_000)) ||
+        (s.cooldownSkipped !== undefined && typeof s.cooldownSkipped !== "boolean") ||
         (s.nextStatusCheckAt !== undefined && (!Number.isFinite(s.nextStatusCheckAt) || s.nextStatusCheckAt < 0 || s.nextStatusCheckAt > state.createdAt + TOKEN_VALID_MS)))) {
     throw new Error("Malformed or expired transcription job token.");
   }
@@ -187,7 +211,10 @@ async function requestGemini(
       if (response.ok) return json;
       const detail = (json.error && typeof json.error === "object"
         ? (json.error as {message?: unknown}).message : undefined) ?? `HTTP ${response.status}`;
-      lastError = new Error(`HTTP ${response.status}: ${safeMessage(detail)}`);
+      const retryAfterMs = parseRetryAfter(response.headers) ?? parseRetryFromMessage(detail);
+      lastError = Object.assign(new Error(`HTTP ${response.status}: ${safeMessage(detail)}`), {
+        httpStatus: response.status, retryAfterMs,
+      });
       // 408/5xx may be emitted after a server accepted the POST.
       if (method === "POST" && [408, 500, 502, 503, 504].includes(response.status)) {
         throw new AmbiguousSubmissionError(lastError.message);
@@ -196,8 +223,7 @@ async function requestGemini(
       // Polling too early during a free-tier minute-wide 429 window only makes it worse.
       // Keep the interaction ID and let the caller poll again after the indicated delay.
       if (response.status === 429 && method === "GET") break;
-      const retryAfter = parseRetryAfter(response.headers) ?? parseRetryFromMessage(detail);
-      await new Promise((resolve) => setTimeout(resolve, retryAfter ?? RETRY_DELAYS_MS[attempt]));
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs ?? RETRY_DELAYS_MS[attempt]));
     } catch (err) {
       if (err instanceof AmbiguousSubmissionError) throw err;
       lastError = new Error(`Gemini ${method} request failed: ${safeMessage(err instanceof Error ? err.message : err)}`);
@@ -315,7 +341,7 @@ function createSegments(duration: number | null, chunkSeconds: number, hasPhysic
     attempts:0,
   }));
 }
-function makeView(job: JobState, statuses: Array<JobStatus | "queued">, texts?: string[]): TranscriptionJobResult {
+function makeView(job: JobState, statuses: Array<JobStatus | "queued" | "requires_action">, texts?: string[]): TranscriptionJobResult {
   const total = job.segments.length;
   const completed = statuses.filter(x=>x==="completed").length;
   const hasError = statuses.includes("failed");
@@ -329,9 +355,20 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued">, texts?: 
     segments:job.segments.map((s,i)=>({
       startSeconds:s.startSeconds,endSeconds:s.endSeconds,
       modelIndex:s.modelIndex,model:MODELS[s.modelIndex],attempts:s.attempts,
-      status:statuses[i],...(s.lastError?{error:s.lastError}:{})
+      status:statuses[i],...(s.lastError?{error:s.lastError}:{}),
+      ...(s.lastReadError?{lastReadError:s.lastReadError}:{}),
+      ...(s.lastProviderStatus?{lastProviderStatus:s.lastProviderStatus}:{}),
+      ...(s.lastHttpStatus!==undefined?{lastHttpStatus:s.lastHttpStatus}:{}),
+      ...(s.lastCheckedAt!==undefined?{lastCheckedAt:s.lastCheckedAt}:{}),
+      ...(s.lastRetryAfterMs!==undefined?{lastRetryAfterMs:s.lastRetryAfterMs}:{}),
+      ...(s.nextStatusCheckAt!==undefined?{nextStatusCheckAt:s.nextStatusCheckAt}:{}),
+      ...(s.cooldownSkipped?{cooldownSkipped:true}:{})
     }))
   };
+  const warnings=job.segments.flatMap((s,i)=>s.cooldownSkipped
+    ? [`segment ${i+1}: GET skipped during cooldown`]
+    : s.lastReadError ? [`segment ${i+1}: ${s.lastReadError}`] : []);
+  if(warnings.length) out.readWarning=warnings.join(" | ").slice(0,1000);
   if(status==="completed" && texts) {
     // Preserve every segment, including possible overlap speech; never silently drop content.
     const transcript=texts.map(s=>s.trim()).join("\n").trim();
@@ -410,16 +447,19 @@ function providerFailure(interaction:Record<string,unknown>):string {
 }
 export async function getGeminiTranscriptionJob(
   jobToken:string,
-  hooks?:{beforeNewPost?:()=>Promise<void>;afterNewPost?:(token:string)=>Promise<void>}
+  hooks?:{beforeNewPost?:()=>Promise<void>;afterNewPost?:(token:string)=>Promise<void>},
+  options?:{readOnly?:boolean}
 ):Promise<TranscriptionJobResult>{
+  const readOnly=options?.readOnly===true;
   const job=decodeJob(jobToken);
   if(job.captionZ) return makeView(job,["completed"],[restoreTranscript(job.captionZ)]);
   getApiKey();
-  const statuses:Array<JobStatus|"queued">=Array.from({length:job.segments.length},()=>"queued");
+  const statuses:Array<JobStatus|"queued"|"requires_action">=Array.from({length:job.segments.length},()=>"queued");
   const texts:string[]=Array.from({length:job.segments.length},()=>"");
   // Persist a retry POST reservation and its resulting ID before any later POST.
   // Durable retries are serial; normal status GETs remain safely repeatable.
   const retryPost=async(segment:SegmentState)=>{
+    if(readOnly) throw new Error("GET-only diagnosis prohibits Gemini POST.");
     if(hooks?.beforeNewPost) await hooks.beforeNewPost();
     await createInteraction(job,segment);
     if(hooks?.afterNewPost) await hooks.afterNewPost(encodeJob(job));
@@ -435,6 +475,10 @@ export async function getGeminiTranscriptionJob(
         continue;
       }
       if(!segment.interactionId){
+        if(readOnly){
+          statuses[i]=segment.submissionUnknown?"failed":"queued";
+          continue;
+        }
         if(segment.submissionUnknown){
           // No interaction ID is available; retrying may duplicate a charged job.
           statuses[i]="failed";
@@ -449,12 +493,19 @@ export async function getGeminiTranscriptionJob(
         continue;
       }
       if(segment.nextStatusCheckAt && Date.now() < segment.nextStatusCheckAt){
+        segment.cooldownSkipped=true;
         statuses[i]="in_progress";
         continue;
       }
       try{
         const payload=await requestGemini(`${GEMINI_ENDPOINT}/${encodeURIComponent(segment.interactionId)}`,"GET");
         const state=String(payload.status||"");
+        segment.lastProviderStatus=state;
+        segment.lastHttpStatus=200;
+        segment.lastCheckedAt=Date.now();
+        delete segment.lastReadError;
+        delete segment.lastRetryAfterMs;
+        delete segment.cooldownSkipped;
         if(state==="completed"){
           const txt=extractOutput(payload);
           if(txt){
@@ -467,14 +518,14 @@ export async function getGeminiTranscriptionJob(
           }
           else{statuses[i]="failed";segment.lastError="Completed interaction contained no transcript text.";}
         }else if(state==="in_progress"||state==="queued"||state==="requires_action"){
-          statuses[i]="in_progress";
+          statuses[i]=state;
           delete segment.lastError;
           delete segment.read429Count;
           delete segment.nextStatusCheckAt;
         }else if(state==="failed"||state==="cancelled"||state==="incomplete"){
           const message=providerFailure(payload);
           segment.lastError=message;
-          if(segment.attempts<3 && isRetryableError(message)){
+          if(!readOnly && segment.attempts<3 && isRetryableError(message)){
             segment.modelIndex=Math.min(segment.modelIndex+1,MODELS.length-1);
             segment.interactionId=null;
             delete segment.read429Count;
@@ -485,13 +536,22 @@ export async function getGeminiTranscriptionJob(
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
       }catch(err){
         const message=safeMessage(err instanceof Error?err.message:err);
-        const isQuotaRead429=/^HTTP 429:/.test(message);
+        const readError=err as Error & {httpStatus?:number;retryAfterMs?:number|null};
+        segment.lastCheckedAt=Date.now();
+        segment.lastReadError=message;
+        segment.cooldownSkipped=false;
+        if(readError.httpStatus!==undefined) segment.lastHttpStatus=readError.httpStatus;
+        else delete segment.lastHttpStatus;
+        if(readError.retryAfterMs!==undefined && readError.retryAfterMs!==null)
+          segment.lastRetryAfterMs=readError.retryAfterMs;
+        else delete segment.lastRetryAfterMs;
+        const isQuotaRead429=readError.httpStatus===429 || /^HTTP 429:/.test(message);
         if(isQuotaRead429){
           // A 429 GET never proves remote failure. Keep the active interaction ID,
           // retry only after the provider cooldown, and do not submit duplicates.
           const already429=/^HTTP 429:/.test(segment.lastError ?? "");
           segment.read429Count=Math.min(20,(segment.read429Count ?? (already429?1:0))+1);
-          const delay=parseRetryFromMessage(message) ?? 30_000;
+          const delay=readError.retryAfterMs ?? parseRetryFromMessage(message) ?? 30_000;
           segment.nextStatusCheckAt=Date.now()+Math.max(1_000,delay);
         }
         segment.lastError=message;
@@ -501,4 +561,9 @@ export async function getGeminiTranscriptionJob(
     }
   }));
   return makeView(job,statuses,texts);
+}
+
+/** Reads existing interactions only. Provider POST is unreachable on this path. */
+export function getGeminiTranscriptionJobReadOnly(jobToken:string):Promise<TranscriptionJobResult> {
+  return getGeminiTranscriptionJob(jobToken,undefined,{readOnly:true});
 }

@@ -110,7 +110,7 @@ const queuedJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSec
 queue=[reply({status:'queued'})];
 const queuedCheck=await getGeminiTranscriptionJob(queuedJob.jobToken);
 assert.equal(queuedCheck.status,'in_progress');
-assert.equal(queuedCheck.segments[0].status,'in_progress');
+assert.equal(queuedCheck.segments[0].status,'queued');
 assert.equal(queuedCheck.segments[0].modelIndex,0);
 
 // INTERNAL is a transient provider failure, even when nested in an errors array.
@@ -129,11 +129,64 @@ assert.notEqual(recoveredInternal.jobToken,internal.jobToken);
 queue=[reply({id:'v1_rate1',status:'in_progress'})];
 const throttled=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 const nBeforeRateGet=calls.length;
-queue=[reply({error:{message:'Rate limit exceeded for model gemini-3.8-flash. Please retry in 27s'}},429)];
+queue=[reply({error:{message:'Rate limit exceeded. Retry later.'}},429,{'Retry-After':'7'})];
 const throttledPoll=await getGeminiTranscriptionJob(throttled.jobToken);
 assert.equal(throttledPoll.status,'in_progress');
 assert.equal(throttledPoll.segments[0].modelIndex,0);
 assert.equal(calls.length,nBeforeRateGet+1);
+assert.equal(throttledPoll.segments[0].lastHttpStatus,429);
+assert.equal(throttledPoll.segments[0].lastRetryAfterMs,7000);
+assert.match(throttledPoll.readWarning,/HTTP 429/);
+assert.ok(throttledPoll.segments[0].lastCheckedAt>0);
+const beforeCooldownGet=calls.length;
+const cooling=await getGeminiTranscriptionJob(throttledPoll.jobToken,undefined,{readOnly:true});
+assert.equal(calls.length,beforeCooldownGet);
+assert.equal(cooling.segments[0].cooldownSkipped,true);
+assert.match(cooling.readWarning,/GET skipped/);
+assert.equal(cooling.segments[0].lastProviderStatus,undefined);
+
+// GET-only must never submit a new interaction on provider failure, even if retryable.
+queue=[reply({id:'v1_readonly_fail',status:'in_progress'})];
+const roFail=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+const beforeReadOnlyPosts=calls.filter(c=>c.method==='POST').length;
+queue=[reply({status:'failed',error:{code:503,message:'503 high demand'}})];
+const roFailed=await getGeminiTranscriptionJob(roFail.jobToken,undefined,{readOnly:true});
+assert.equal(roFailed.status,'failed');
+assert.equal(calls.filter(c=>c.method==='POST').length,beforeReadOnlyPosts);
+assert.equal(roFailed.segments[0].attempts,1);
+assert.equal(roFailed.segments[0].lastProviderStatus,'failed');
+assert.equal(roFailed.segments[0].lastHttpStatus,200);
+// requires_action is a genuine provider state; do not report a confirmed in_progress.
+queue=[reply({id:'v1_readonly_action',status:'in_progress'})];
+const roAction=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+queue=[reply({status:'requires_action',steps:[{type:'tool_call',content:[]}]})];
+const action=await getGeminiTranscriptionJob(roAction.jobToken,undefined,{readOnly:true});
+assert.equal(action.status,'in_progress');
+assert.equal(action.segments[0].status,'requires_action');
+assert.equal(action.segments[0].lastProviderStatus,'requires_action');
+assert.equal(calls.filter(c=>c.method==='POST').length,beforeReadOnlyPosts+1);
+
+// A sustained 503 GET remains an unconfirmed provider state; GET-only cannot POST.
+queue=[reply({id:'v1_readonly_http503',status:'in_progress'})];
+const transport503=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+const postsBefore503=calls.filter(c=>c.method==='POST').length;
+queue=Array.from({length:4},()=>reply({error:{message:'Provider overloaded'}},503,{'Retry-After':'0'}));
+const unavailable=await getGeminiTranscriptionJob(transport503.jobToken,undefined,{readOnly:true});
+assert.equal(unavailable.status,'in_progress');
+assert.equal(unavailable.segments[0].lastHttpStatus,503);
+assert.match(unavailable.readWarning,/HTTP 503/);
+assert.equal(unavailable.segments[0].attempts,1);
+assert.equal(calls.filter(c=>c.method==='POST').length,postsBefore503);
+// A transient network error is recovered by GET; do not retain stale failure metadata.
+queue=[reply({id:'v1_readonly_network',status:'in_progress'})];
+const flaky=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
+const postsBeforeNetwork=calls.filter(c=>c.method==='POST').length;
+queue=[()=>{throw new Error('fixture network timeout');},reply({status:'in_progress'})];
+const recoveredRead=await getGeminiTranscriptionJob(flaky.jobToken,undefined,{readOnly:true});
+assert.equal(recoveredRead.segments[0].lastHttpStatus,200);
+assert.equal(recoveredRead.segments[0].lastReadError,undefined);
+assert.equal(recoveredRead.readWarning,undefined);
+assert.equal(calls.filter(c=>c.method==='POST').length,postsBeforeNetwork);
 
 // A POST 429 may be retried, honoring provider retry guidance.
 queue=[

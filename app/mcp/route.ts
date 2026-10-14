@@ -105,9 +105,17 @@ const asyncJobOutputSchema = z.object({
     modelIndex: z.number().int().nonnegative(),
     model: z.string(),
     attempts: z.number().int().nonnegative(),
-    status: z.enum(["queued", "in_progress", "completed", "failed"]),
+    status: z.enum(["queued", "in_progress", "requires_action", "completed", "failed"]),
     error: z.string().optional(),
+    lastReadError: z.string().optional(),
+    lastProviderStatus: z.string().optional(),
+    lastHttpStatus: z.number().int().optional(),
+    lastCheckedAt: z.number().int().optional(),
+    lastRetryAfterMs: z.number().nonnegative().optional(),
+    nextStatusCheckAt: z.number().optional(),
+    cooldownSkipped: z.boolean().optional(),
   })),
+  readWarning: z.string().optional(),
   transcript: z.string().optional(),
   characterCount: z.number().int().nonnegative().optional(),
   lineCount: z.number().int().nonnegative().optional(),
@@ -196,7 +204,10 @@ const handler = createMcpHandler(
           "Pass the durable jobToken on every poll; the store recovers the latest state across workers.",
           "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
         ].join(" "),
-        inputSchema: { jobToken: z.string().min(1).max(128000) },
+        inputSchema: {
+          jobToken: z.string().min(1).max(128000),
+          readOnly: z.boolean().optional().describe("GET-only status diagnosis. Never submits or retries Gemini interactions."),
+        },
         outputSchema: asyncJobOutputSchema.shape,
         annotations: {
           readOnlyHint: false,
@@ -205,9 +216,9 @@ const handler = createMcpHandler(
           openWorldHint: true,
         },
       },
-      async ({ jobToken }) => {
+      async ({ jobToken, readOnly }) => {
         try {
-          const result = await getPersistentTranscriptionJob(jobToken);
+          const result = await getPersistentTranscriptionJob(jobToken,{readOnly});
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not poll transcription job." }] };

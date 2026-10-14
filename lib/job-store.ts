@@ -299,9 +299,9 @@ export async function startPersistentTranscriptionJob(args:StartTranscriptionArg
   return readPublic(config,id);
 }
 
-export async function getPersistentTranscriptionJob(jobToken:string):Promise<TranscriptionJobResult> {
+export async function getPersistentTranscriptionJob(jobToken:string,options?:{readOnly?:boolean}):Promise<TranscriptionJobResult> {
   const config=getConfig();
-  if(!config) return getGeminiTranscriptionJob(jobToken);
+  if(!config) return getGeminiTranscriptionJob(jobToken,undefined,options);
   const id=decodeToken(config,jobToken);
   const loaded=await load(config,id);
   if(!loaded) throw new Error("Durable transcription job missing or expired.");
@@ -332,9 +332,9 @@ export async function getPersistentTranscriptionJob(jobToken:string):Promise<Tra
       throw new Error("Could not durably save Gemini retry interaction ID.");
   };
   try {
-    const result=await getGeminiTranscriptionJob(loaded.record.result.jobToken,{
-      beforeNewPost,afterNewPost
-    });
+    const result=options?.readOnly
+      ? await getGeminiTranscriptionJob(loaded.record.result.jobToken,undefined,{readOnly:true})
+      : await getGeminiTranscriptionJob(loaded.record.result.jobToken,{beforeNewPost,afterNewPost});
     await storeResult(config,id,owner,result);
   } catch (error) {
     // Every Gemini retry POST first reserves phase=submitting. A failure while
