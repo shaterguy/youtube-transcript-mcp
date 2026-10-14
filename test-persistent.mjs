@@ -79,6 +79,25 @@ assert.equal(afterComplete.transcript,completed.transcript);
 assert.equal(providerPost,1);
 assert.equal(providerGet,2,'completed segment must be reused');
 
+// Losing the Gemini credential while polling is recoverable because no POST
+// was reserved. Resume the persisted interaction after the key is restored.
+const keyPauseParams={...params,url:'https://youtu.be/2glIuHz77IY'};
+providerReplies=[{id:'v1_key_paused',status:'in_progress'}];
+const keyPaused=await startPersistentTranscriptionJob(keyPauseParams);
+const keyPauseRedisKey='yt:transcript:job:v2:'+keyPaused.jobToken.split('.')[1];
+const beforeKeyPausePost=providerPost;
+delete process.env.GEMINI_API_KEY;
+await assert.rejects(getPersistentTranscriptionJob(keyPaused.jobToken),/GEMINI_API_KEY/);
+process.env.GEMINI_API_KEY='fixture-gemini-key';
+const afterKeyPause=JSON.parse(redisData.get(keyPauseRedisKey));
+assert.equal(afterKeyPause.phase,'active','GET-only failure must remain retryable');
+assert.equal(afterKeyPause.result.status,'in_progress');
+providerReplies=[{status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:00:01] Speaker: resumed after key restoration'}]}]}];
+const resumedAfterKey=await getPersistentTranscriptionJob(keyPaused.jobToken);
+assert.equal(resumedAfterKey.status,'completed');
+assert.match(resumedAfterKey.transcript,/resumed after key restoration/);
+assert.equal(providerPost,beforeKeyPausePost,'GET-only recovery must never resubmit provider POST');
+
 // Another worker, after a process restart, sees a durable submission marker.
 const newer={...params,url:'https://youtu.be/5k0tCrXdIIM'};
 const serialized=JSON.stringify({videoId:'5k0tCrXdIIM',language:'ko-kr',durationSeconds:90,chunkSeconds:240,geminiFileUri:file,geminiMimeType:null});

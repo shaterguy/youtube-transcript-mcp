@@ -260,12 +260,16 @@ export async function getPersistentTranscriptionJob(jobToken:string):Promise<Tra
     });
     await storeResult(config,id,owner,result);
   } catch (error) {
-    // Poll may have included a provider-level retry POST; it is unsafe to
-    // restore the previous token after losing the outcome.
+    // Every Gemini retry POST first reserves phase=submitting. A failure while
+    // still polling is GET-only or occurs after a new interaction token was
+    // durably recorded, so retrying its status GET is safe. Only an unresolved
+    // submitting phase must be quarantined to prevent duplicate provider POSTs.
     const observed=await load(config,id);
-    if(observed && observed.record.owner===owner && ["polling","submitting"].includes(observed.record.phase)) {
+    if(observed && observed.record.owner===owner && observed.record.phase==="submitting") {
       await saveIfUnchanged(config,id,observed.raw,{...observed.record,phase:"unknown",updatedAt:Date.now(),
-        error:`Worker interrupted while polling or retrying provider: ${redact(error)}. No automatic duplicate POST.`});
+        error:`Worker interrupted during Gemini POST: ${redact(error)}. No automatic duplicate POST.`});
+    } else if(observed && observed.record.owner===owner && observed.record.phase==="polling") {
+      await saveIfUnchanged(config,id,observed.raw,{...observed.record,phase:"active",updatedAt:Date.now()});
     }
     throw error;
   }
