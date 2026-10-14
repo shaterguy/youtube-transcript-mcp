@@ -1,15 +1,9 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { isGeminiConfigured } from "../../lib/gemini";
+import { completedPolicyShape, withYouTubeResponsePolicy } from "../../lib/youtube-response-output";
+import { startPersistentTranscriptionJob, getPersistentTranscriptionJob, isDurableTranscriptStoreConfigured } from "../../lib/job-store";
 import {
-  getCachedYouTubeTranscript,
-  TRANSCRIPT_CACHE_VERSION,
-} from "../../lib/transcript-cache";
-import { TranscriptError } from "../../lib/youtube";
-import { startPersistentTranscriptionJob, getPersistentTranscriptionJob } from "../../lib/job-store";
-import {
-  YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
-  YOUTUBE_RESPONSE_CONTRACT,
   YOUTUBE_RESPONSE_POLICY_VERSION,
   YOUTUBE_SERVER_INSTRUCTIONS,
   YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
@@ -17,79 +11,12 @@ import {
 
 export const maxDuration = 300;
 
-const responseContractSchema = z.object({
-  policyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
-  scope: z.literal("youtube-content-only"),
-  transcriptAcquisition: z.object({
-    tool: z.literal("get_youtube_transcript"),
-    exclusivePath: z.literal(true),
-    otherTranscriptToolsAllowed: z.literal(false),
-    externalResearchAfterTranscriptAllowed: z.literal(true),
-  }),
-  contentGeneration: z.object({
-    performedByMcp: z.literal(false),
-    performedByHostLlm: z.literal(true),
-    mcpProvidesTranscriptAndResponseRulesOnly: z.literal(true),
-  }),
-  composition: z.object({
-    mode: z.literal("source-assimilated-report"),
-    reportStyleRequired: z.literal(true),
-    transcriptRetellingForbidden: z.literal(true),
-    attributionNarrationForbidden: z.literal(true),
-    sourceViewpointPreservedWithoutAttributionFrame: z.literal(true),
-    rule: z.string(),
-    negativeExamples: z.array(z.string()),
-    positiveExamples: z.array(z.string()),
-  }),
-  defaultMode: z.literal("organized-analysis"),
-  rawTranscriptOnlyWhenExplicitlyRequested: z.literal(true),
-  transcriptCleanup: z.object({
-    silentlyCorrectObviousTyposAndTranscriptionErrors: z.literal(true),
-  }),
-  sections: z.object({
-    overview: z.object({
-      label: z.literal("[개요]"),
-      required: z.literal(true),
-      rule: z.string(),
-    }),
-    content: z.object({
-      label: z.literal("[내용정리]"),
-      required: z.literal(true),
-      rule: z.string(),
-    }),
-    factCheck: z.object({
-      label: z.literal("[사실검증]"),
-      required: z.literal(false),
-      omitWhenNoMaterialError: z.literal(true),
-      rule: z.string(),
-    }),
-    additionalAnalysis: z.object({
-      label: z.literal("[추가분석]"),
-      required: z.literal(true),
-      rule: z.string(),
-    }),
-  }),
-  timestamps: z.object({
-    clickable: z.literal(true),
-    markdownLinkRequired: z.literal(true),
-    rejectPlainTextTimestamp: z.literal(true),
-    placement: z.literal("end-of-content-unit"),
-    prefixPlacementForbidden: z.literal(true),
-    standalonePlacementForbidden: z.literal(true),
-    headingPlacementForbidden: z.literal(true),
-    afterTerminalPunctuation: z.literal(true),
-    attachToMajorMeaningUnits: z.literal(true),
-    oneRepresentativeTimestampPerMeaningUnitPreferred: z.literal(true),
-    useActualSpeechPositionsOnly: z.literal(true),
-    neverInvent: z.literal(true),
-    displayTextFormat: z.literal("MM:SS or HH:MM:SS"),
-    markdownLinkTemplate: z.literal(
-      "<content sentence or paragraph>. [<displayTimestamp>](<canonicalUrl>&t=<seconds>s)"
-    ),
-  }),
-});
-
 const asyncJobOutputSchema = z.object({
+  ...completedPolicyShape,
+  cacheProvider: z.enum(["durable-local", "durable-redis"]).optional(),
+  cacheVersion: z.literal("durable-v3").optional(),
+  cacheCreatedAt: z.string().datetime().optional(),
+  cacheKey: z.string().optional(),
   status: z.enum(["queued", "in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "rate_limited", "blocked"]),
   jobToken: z.string(),
   videoId: z.string(),
@@ -108,6 +35,7 @@ const asyncJobOutputSchema = z.object({
     status: z.enum(["queued", "in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "rate_limited", "blocked"]),
     error: z.string().optional(),
     lastReadError: z.string().optional(),
+    lastPostError: z.string().optional(),
     lastProviderStatus: z.string().optional(),
     lastHttpStatus: z.number().int().optional(),
     lastCheckedAt: z.number().int().optional(),
@@ -151,7 +79,7 @@ const handler = createMcpHandler(
             text: [
               "YouTube Transcript MCP connection is working.",
               `Gemini fallback configured: ${isGeminiConfigured() ? "yes" : "no"}.`,
-              `Transcript cache configured: yes (${TRANSCRIPT_CACHE_VERSION}).`,
+              `Transcript cache configured: ${isDurableTranscriptStoreConfigured() ? "yes" : "no"} (durable-v3, normalized video ID + language).`,
               `YouTube response policy configured: yes (${YOUTUBE_RESPONSE_POLICY_VERSION}).`,
             ].join("\n"),
           },
@@ -162,10 +90,12 @@ const handler = createMcpHandler(
     server.registerTool(
       "start_youtube_transcript_job",
       {
-        title: "Start resilient Gemini background transcription with explicit time scopes",
+        title: "Get cached captions or start durable YouTube transcription",
         description: [
-          "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
-          "returns a durable jobToken immediately and transcribes known-duration videos in overlapping time windows.",
+          YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
+          "A single start reuses complete cached transcripts or active jobs by normalized video ID and language, then tries yt-dlp captions, then Gemini background transcription if captions are unavailable.",
+          "Returns completed caption/cache results directly, or a durable jobToken for later retrieval. There is no whole-job timeout; transport timeouts never cancel an accepted job.",
+          "Every verified completion carries the same responseDirective and responseContract before transcript, regardless of acquisition path.",
           "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
           "Optional Gemini Files API URI enables actual clipped media windows. Initial POST throttling has bounded retries; confirmed provider stops are never silently resubmitted.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
@@ -191,7 +121,7 @@ const handler = createMcpHandler(
       },
       async (args) => {
         try {
-          const result = await startPersistentTranscriptionJob(args);
+          const result = withYouTubeResponsePolicy(await startPersistentTranscriptionJob(args));
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start transcription job." }] };
@@ -204,9 +134,10 @@ const handler = createMcpHandler(
       {
         title: "Poll background transcription job and assemble completed clips",
         description: [
-          "Read Gemini interaction status and combine clips only when ALL segments completed.",
+          "Retrieve the same durable job, resume a proven pre-submission acquisition after its lease expires, and combine text only when ALL segments completed.",
           "Stop automatic waiting when shouldPoll=false: rate_limited, blocked, requires_action, failed, cancelled or incomplete.",
-          "retryable only permits an explicit status GET after nextStatusCheckAt; it never authorizes another provider POST.",
+          "For accepted interactions, retryable means the same status GET only. A proven unsubmitted acquisition or explicitly rejected initial POST may resume within the same job after its cooldown; unknown POST outcomes are never replayed.",
+          "Use readOnly=true to prohibit all provider POSTs, including acquisition recovery and rejected-submit retries.",
           "Pass the durable jobToken on every poll; the store recovers the latest state across workers.",
           "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
         ].join(" "),
@@ -224,7 +155,7 @@ const handler = createMcpHandler(
       },
       async ({ jobToken, readOnly }) => {
         try {
-          const result = await getPersistentTranscriptionJob(jobToken,{readOnly});
+          const result = withYouTubeResponsePolicy(await getPersistentTranscriptionJob(jobToken,{readOnly}));
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not poll transcription job." }] };
@@ -232,101 +163,7 @@ const handler = createMcpHandler(
       }
     );
 
-    server.registerTool(
-      "get_youtube_transcript",
-      {
-        title: "Get or transcribe YouTube video",
-        description: [
-          YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
-          "The complete transcript is returned in the structured output field named transcript.",
-          "The final-response directive and response contract are returned before the transcript so the host model sees the composition rules before the long source text.",
-          "Results are cached by normalized video ID and language so repeated requests reuse the stored transcript instead of transcribing the video again.",
-          "The tool first uses yt-dlp to obtain original-language public subtitles with timestamps and invokes Gemini only after confirming no usable subtitles are available.",
-        ].join(" "),
-        inputSchema: {
-          url: z
-            .string()
-            .min(1)
-            .max(2_048)
-            .describe("A public YouTube video URL, shared text containing the URL, or an 11-character video ID."),
-          language: z
-            .string()
-            .min(2)
-            .max(35)
-            .optional()
-            .describe("Preferred language tag for the public-caption provider, such as ko-KR or en-US."),
-        },
-        outputSchema: {
-          responsePolicyVersion: z.literal(YOUTUBE_RESPONSE_POLICY_VERSION),
-          responseDirective: z.literal(YOUTUBE_FINAL_RESPONSE_DIRECTIVE),
-          responseContract: responseContractSchema,
-          videoId: z.string(),
-          canonicalUrl: z.string().url(),
-          source: z.enum(["yt-dlp", "gemini"]),
-          characterCount: z.number().int().nonnegative(),
-          lineCount: z.number().int().nonnegative(),
-          first30Lines: z.array(z.string()).max(30),
-          transcript: z.string(),
-          cacheProvider: z.literal("vercel-data-cache"),
-          cacheVersion: z.string(),
-          cacheCreatedAt: z.string().datetime(),
-        },
-        annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: true,
-        },
-      },
-      async ({ url, language }) => {
-        try {
-          const result = await getCachedYouTubeTranscript(url, language);
-          const transcriptLines = result.transcript.split("\n");
-          const structuredResult = {
-            responsePolicyVersion: YOUTUBE_RESPONSE_POLICY_VERSION,
-            responseDirective: YOUTUBE_FINAL_RESPONSE_DIRECTIVE,
-            responseContract: YOUTUBE_RESPONSE_CONTRACT,
-            videoId: result.videoId,
-            canonicalUrl: result.canonicalUrl,
-            source: result.source,
-            characterCount: result.transcript.length,
-            lineCount: transcriptLines.length,
-            first30Lines: transcriptLines.slice(0, 30),
-            transcript: result.transcript,
-            cacheProvider: result.cacheProvider,
-            cacheVersion: result.cacheVersion,
-            cacheCreatedAt: result.cacheCreatedAt,
-          };
 
-          return {
-            structuredContent: structuredResult,
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(structuredResult, null, 2),
-              },
-            ],
-          };
-        } catch (error) {
-          const message =
-            error instanceof TranscriptError
-              ? error.message
-              : error instanceof Error
-                ? error.message
-                : "Unknown transcript retrieval error.";
-
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Could not retrieve the YouTube transcript. ${message}`,
-              },
-            ],
-          };
-        }
-      }
-    );
   },
   {
     instructions: YOUTUBE_SERVER_INSTRUCTIONS,

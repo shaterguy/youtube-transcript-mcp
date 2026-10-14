@@ -1,7 +1,7 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.4" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.5" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
-  "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. Use get_youtube_transcript first for ordinary videos. For long videos or when public captions and synchronous Gemini fail, use start_youtube_transcript_job then get_youtube_transcript_job from this same MCP until completed or failed. Do not call yt-dlp, metadata scrapers, or external transcript services to acquire source text. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
+  "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. Use start_youtube_transcript_job as the single entry for every video. It reuses cached transcripts or active jobs, then tries public captions and falls back to durable Gemini transcription within the same start. Use get_youtube_transcript_job for later results and follow its explicit status guidance. Do not call yt-dlp, metadata scrapers, or external transcript services to acquire source text. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
 
 export const YOUTUBE_FINAL_RESPONSE_DIRECTIVE =
   "FINAL RESPONSE RULE: Assimilate the transcript into standalone report prose; do not retell what the speaker/video said, explained, claimed, mentioned, or discussed. Write the substantive propositions directly. Every YouTube timestamp must be a clickable Markdown link placed only AFTER the completed sentence or paragraph it supports, never before the content, in a heading, or on a standalone line. The MCP supplies transcript and rules only; the host LLM writes the actual report." as const;
@@ -9,7 +9,7 @@ export const YOUTUBE_FINAL_RESPONSE_DIRECTIVE =
 export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규칙 (${YOUTUBE_RESPONSE_POLICY_VERSION})
 
 1. 자막 확보
-- 사용자가 공개 YouTube URL 또는 11자리 video ID를 제공하면 get_youtube_transcript를 우선 사용한다. 동기식 자막 수집이 실패하거나 영상이 길면 같은 MCP의 start_youtube_transcript_job과 get_youtube_transcript_job을 순서대로 이용하여 전체 구간 완료 여부를 확인한다.
+- 사용자가 공개 YouTube URL 또는 11자리 video ID를 제공하면 start_youtube_transcript_job을 단일 시작 경로로 사용한다. 같은 시작 요청에서 완료 캐시·진행 중 작업을 재사용하고, yt-dlp 공개 자막을 시도한 뒤 확보하지 못하면 Gemini 비동기 전사로 진행한다. 이후 같은 MCP의 get_youtube_transcript_job으로 상태와 전체 구간 완료 여부를 확인한다.
 - 자막 확보 전에 yt-dlp, 메타데이터 조회기, 다른 전사 도구를 사전·보조·대체 호출하지 않는다.
 - 자막 확보가 끝난 뒤 사실검증과 추가분석을 위해 웹검색이나 다른 외부 도구를 사용하는 것은 허용한다.
 
@@ -56,7 +56,7 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
   policyVersion: YOUTUBE_RESPONSE_POLICY_VERSION,
   scope: "youtube-content-only",
   transcriptAcquisition: {
-    tool: "get_youtube_transcript",
+    tool: "start_youtube_transcript_job",
     exclusivePath: true,
     otherTranscriptToolsAllowed: false,
     externalResearchAfterTranscriptAllowed: true,

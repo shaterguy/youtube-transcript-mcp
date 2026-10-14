@@ -26,6 +26,7 @@ global.fetch=async (url,opts={})=>{
       return response({result:'OK'});
     }
     if(cmd==='GET')return response({result:redisData.get(args[0])??null});
+    if(cmd==='SCAN')return response({result:['0',[...redisData.keys()]]});
     if(cmd==='EVAL'){
       const [script,keyCount,key,expected,next]=args;
       assert.match(script,/redis.call\('SET'/);

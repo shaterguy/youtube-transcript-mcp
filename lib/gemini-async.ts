@@ -32,6 +32,7 @@ export type SegmentState = {
   attempts: number;
   lastError?: string;
   lastReadError?: string;
+  lastPostError?: string;
   lastProviderStatus?: string;
   lastHttpStatus?: number;
   lastCheckedAt?: number;
@@ -58,6 +59,11 @@ type JobState = {
   captionZ?: string;
 };
 export type TranscriptionJobResult = {
+  cacheProvider?: "durable-local" | "durable-redis";
+  cacheVersion?: "durable-v3";
+  cacheCreatedAt?: string;
+  cacheKey?: string;
+
   status: JobStatus;
   jobToken: string;
   videoId: string;
@@ -72,6 +78,7 @@ export type TranscriptionJobResult = {
     model: string;
     error?: string;
     lastReadError?: string;
+  lastPostError?: string;
     lastProviderStatus?: string;
     lastHttpStatus?: number;
     lastCheckedAt?: number;
@@ -155,6 +162,7 @@ function decodeJob(token: string): JobState {
         (s.transcriptZ !== undefined && (typeof s.transcriptZ !== "string" || s.transcriptZ.length > MAX_COMPRESSED_SEGMENT_CHARS || !/^[A-Za-z0-9_-]+$/.test(s.transcriptZ))) ||
         (s.read429Count !== undefined && (!Number.isInteger(s.read429Count) || s.read429Count < 0 || s.read429Count > 20)) ||
         (s.lastReadError !== undefined && (typeof s.lastReadError !== "string" || s.lastReadError.length > 500)) ||
+        (s.lastPostError !== undefined && (typeof s.lastPostError !== "string" || s.lastPostError.length > 500)) ||
         (s.lastProviderStatus !== undefined && (typeof s.lastProviderStatus !== "string" || s.lastProviderStatus.length > 80)) ||
         (s.lastHttpStatus !== undefined && (!Number.isInteger(s.lastHttpStatus) || s.lastHttpStatus < 100 || s.lastHttpStatus > 599)) ||
         (s.lastCheckedAt !== undefined && (!Number.isFinite(s.lastCheckedAt) || s.lastCheckedAt < 0 || s.lastCheckedAt > state.createdAt + TOKEN_VALID_MS)) ||
@@ -239,7 +247,7 @@ async function requestGemini(
       if (!isRetryableStatus(response.status) || attempt === RETRY_DELAYS_MS.length) break;
       // Polling too early during a free-tier minute-wide 429 window only makes it worse.
       // Keep the interaction ID and let the caller poll again after the indicated delay.
-      if (response.status === 429 && method === "GET") break;
+      if (response.status === 429 && (method === "GET" || (retryAfterMs ?? 0) > 2_000)) break;
       await waitForRetry(retryAfterMs ?? RETRY_DELAYS_MS[attempt]);
     } catch (err) {
       if (err instanceof AmbiguousSubmissionError) throw err;
@@ -300,9 +308,21 @@ async function createInteraction(job: JobState, segment: SegmentState): Promise<
     if (typeof response.status === "string") segment.lastProviderStatus = response.status;
     delete segment.submissionUnknown;
     delete segment.lastError;
+    delete segment.lastPostError;
+    delete segment.lastReadError;
+    delete segment.cooldownSkipped;
+    delete segment.nextStatusCheckAt;
+    delete segment.lastRetryAfterMs;
+    segment.lastHttpStatus=200;
   } catch (error) {
     if (error instanceof AmbiguousSubmissionError) segment.submissionUnknown=true;
     segment.lastError = safeMessage(error instanceof Error ? error.message : error);
+    const rejected=error as Error & {httpStatus?:number;retryAfterMs?:number|null};
+    if(!(error instanceof AmbiguousSubmissionError)&&rejected.httpStatus!==undefined){
+      segment.lastPostError=segment.lastError;segment.lastHttpStatus=rejected.httpStatus;
+      if(rejected.retryAfterMs!=null)segment.lastRetryAfterMs=rejected.retryAfterMs;
+      if(rejected.httpStatus===429)segment.nextStatusCheckAt=Date.now()+Math.max(30_000,rejected.retryAfterMs??0);
+    }
   }
 }
 
@@ -366,8 +386,8 @@ export function normalizeTranscriptionJobResult(result: TranscriptionJobResult):
     if (status === "failed" && ["cancelled", "incomplete"].includes(segment.lastProviderStatus ?? "")) {
       status = segment.lastProviderStatus as JobStatus;
     } else if (status !== "completed" && !["failed", "cancelled", "incomplete"].includes(status)) {
-      if (segment.lastReadError || segment.cooldownSkipped) {
-        status = segment.lastHttpStatus === 429 || /^HTTP 429:/.test(segment.lastReadError ?? segment.error ?? "")
+      if (segment.lastReadError || segment.lastPostError || segment.cooldownSkipped) {
+        status = segment.lastHttpStatus === 429 || /^HTTP 429:/.test(segment.lastReadError ?? segment.lastPostError ?? segment.error ?? "")
           ? "rate_limited" : "blocked";
       } else if (["requires_action", "failed", "cancelled", "incomplete"].includes(segment.lastProviderStatus ?? "")) {
         status = segment.lastProviderStatus as JobStatus;
@@ -384,15 +404,15 @@ export function normalizeTranscriptionJobResult(result: TranscriptionJobResult):
   const shouldPoll = status === "in_progress" || status === "queued";
   const interrupted = segments.filter(s => ["rate_limited", "blocked"].includes(s.status));
   const retryable = status === "rate_limited" || (status === "blocked" && interrupted.length > 0 &&
-    interrupted.every(s => Boolean(s.lastReadError || s.cooldownSkipped) &&
+    interrupted.every(s => Boolean(s.lastReadError || s.lastPostError || s.cooldownSkipped) &&
       (s.lastHttpStatus === undefined || isRetryableStatus(s.lastHttpStatus))));
   const deadlines = interrupted.map(s => s.nextStatusCheckAt).filter((v): v is number => typeof v === "number");
   const nextStatusCheckAt = retryable && deadlines.length ? Math.max(...deadlines) : undefined;
-  const providerStates = [...new Set(segments.map(s => s.lastReadError ? "unknown" : s.lastProviderStatus ??
+  const providerStates = [...new Set(segments.map(s => s.lastReadError || s.lastPostError ? "unknown" : s.lastProviderStatus ??
     (s.status === "completed" ? "completed" : "unknown")))];
   const providerStatus = providerStates.length === 1 ? providerStates[0] : "mixed";
   const detail = segments.filter(s => !["completed", "in_progress", "queued"].includes(s.status))
-    .map(s => s.lastReadError || s.error || `Provider status: ${s.lastProviderStatus ?? s.status}`).join(" | ");
+    .map(s => s.lastReadError || s.lastPostError || s.error || `Provider status: ${s.lastProviderStatus ?? s.status}`).join(" | ");
   const reason = status === "completed" ? "All transcript segments completed."
     : shouldPoll ? `Provider status: ${status}.`
     : detail || result.error || `Transcription status: ${status}.`;
@@ -421,6 +441,7 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued" | "require
       modelIndex:s.modelIndex,model:MODELS[s.modelIndex],attempts:s.attempts,
       status:statuses[i],...(s.lastError?{error:s.lastError}:{}),
       ...(s.lastReadError?{lastReadError:s.lastReadError}:{}),
+      ...(s.lastPostError?{lastPostError:s.lastPostError}:{}),
       ...(s.lastProviderStatus?{lastProviderStatus:s.lastProviderStatus}:{}),
       ...(s.lastHttpStatus!==undefined?{lastHttpStatus:s.lastHttpStatus}:{}),
       ...(s.lastCheckedAt!==undefined?{lastCheckedAt:s.lastCheckedAt}:{}),
@@ -430,7 +451,7 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued" | "require
     }))
   };
   const warnings=job.segments.flatMap((s,i)=>s.cooldownSkipped
-    ? [`segment ${i+1}: GET skipped during cooldown`]
+    ? [`segment ${i+1}: ${s.interactionId ? "GET" : "POST retry"} skipped during cooldown`]
     : s.lastReadError ? [`segment ${i+1}: ${s.lastReadError}`] : []);
   if(warnings.length) out.readWarning=warnings.join(" | ").slice(0,1000);
   if(status==="completed" && texts) {
@@ -453,7 +474,7 @@ export async function startGeminiTranscriptionJob(args: {
   chunkSeconds?:number;
   geminiFileUri?:string;
   geminiMimeType?:string;
-}):Promise<TranscriptionJobResult> {
+}, hooks?:{beforeInitialPost?:()=>Promise<void>}):Promise<TranscriptionJobResult> {
   const videoId=extractYouTubeVideoId(args.url);
   const language=args.language?.trim()||"ko-KR";
   const chunkSeconds=args.chunkSeconds??240;
@@ -467,17 +488,17 @@ export async function startGeminiTranscriptionJob(args: {
   if(args.geminiMimeType!==undefined && !/^video\/[a-z0-9.+-]+$/i.test(args.geminiMimeType)){
     throw new Error("geminiMimeType must be a video MIME type.");
   }
-  // The asynchronous tool follows the same caption-first contract as the
-  // synchronous tool. Files API input is already physically clipped media.
+  // The single start path tries captions, then durable Gemini in this same call.
+  // Private/unavailable video restrictions are not bypassed. Files API input is clipped media.
   if (!args.geminiFileUri) {
     try {
-      const captions=await getYouTubeCaptionsWithYtDlp(videoId,language);
+      const captions=await getYouTubeCaptionsWithYtDlp(videoId,language,{budgetMs:120_000});
       const captionJob:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:args.durationSeconds??null,
         chunkSeconds,captionZ:compressTranscript(captions.transcript),
         segments:[{startSeconds:0,endSeconds:null,interactionId:null,modelIndex:0,attempts:0}]};
       return makeView(captionJob,["completed"],[captions.transcript]);
     } catch (error) {
-      if (!(error instanceof YtDlpCaptionError) || ["executable_unavailable","video_unavailable"].includes(error.reason)) throw error;
+      if (!(error instanceof YtDlpCaptionError) || error.reason === "video_unavailable") throw error;
     }
   }
   getApiKey();
@@ -485,6 +506,7 @@ export async function startGeminiTranscriptionJob(args: {
   const job:JobState={version:1,videoId,language,createdAt:Date.now(),durationSeconds:duration,chunkSeconds,
     ...(args.geminiFileUri?{geminiFileUri:args.geminiFileUri,geminiMimeType:args.geminiMimeType??"video/mp4"}:{}),
     segments:createSegments(duration,chunkSeconds,Boolean(args.geminiFileUri))};
+  if(hooks?.beforeInitialPost)await hooks.beforeInitialPost();
   // Eagerly start all clips with bounded concurrency; later polling only reads them.
   let cursor=0;
   await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
@@ -540,6 +562,11 @@ export async function getGeminiTranscriptionJob(
         statuses[i]="completed";
         continue;
       }
+      if(segment.nextStatusCheckAt && Date.now() < segment.nextStatusCheckAt){
+        segment.cooldownSkipped=true;
+        statuses[i]="in_progress";
+        continue;
+      }
       if(!segment.interactionId){
         if(readOnly){
           statuses[i]=segment.submissionUnknown?"failed":"queued";
@@ -550,17 +577,15 @@ export async function getGeminiTranscriptionJob(
           statuses[i]="failed";
           continue;
         }
+        if(segment.lastPostError && segment.lastHttpStatus!==undefined && !isRetryableStatus(segment.lastHttpStatus)){
+          statuses[i]="blocked";continue;
+        }
         if(segment.attempts<3){
           // A previous initiation failed; retry when the client presents its latest token.
           if(segment.attempts>0 && segment.modelIndex<MODELS.length-1) segment.modelIndex++;
           await retryPost(segment);
         }
         statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
-        continue;
-      }
-      if(segment.nextStatusCheckAt && Date.now() < segment.nextStatusCheckAt){
-        segment.cooldownSkipped=true;
-        statuses[i]="in_progress";
         continue;
       }
       try{
