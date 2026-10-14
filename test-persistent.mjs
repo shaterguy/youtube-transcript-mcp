@@ -147,7 +147,18 @@ global.fetch=async (url,options={})=>{
   }
   return originalFetch(url,options);
 };
-providerReplies=[{status:'failed',error:{code:503,message:'503 retryable provider failure'}}];
+const retryRecord=JSON.parse(redisData.get(retryKey));
+const legacyBody=JSON.parse(Buffer.from(retryRecord.result.jobToken.split('.')[0],'base64url'));
+legacyBody.segments[0].interactionId=null;
+legacyBody.segments[0].lastError='HTTP 429: initial request rejected';
+const unsigned=Buffer.from(JSON.stringify(legacyBody)).toString('base64url');
+retryRecord.result.jobToken=unsigned+'.'+createHmac('sha256',process.env.YOUTUBE_TRANSCRIPT_JOB_SIGNING_KEY||process.env.GEMINI_API_KEY).update(unsigned).digest('base64url');
+retryRecord.result.status='blocked';
+retryRecord.result.error='HTTP 429: initial request rejected';
+retryRecord.result.segments[0].status='blocked';
+retryRecord.result.segments[0].error='HTTP 429: initial request rejected';
+redisData.set(retryKey,JSON.stringify(retryRecord));
+providerReplies=[];
 const pendingRetry=getPersistentTranscriptionJob(retryStart.jobToken);
 await enteredRetryPost;
 const beforeQuarantine=JSON.parse(redisData.get(retryKey));
@@ -156,6 +167,8 @@ redisData.set(retryKey,JSON.stringify({...beforeQuarantine,updatedAt:Date.now()-
 const forbiddenRepeat=await getPersistentTranscriptionJob(retryStart.jobToken);
 assert.equal(forbiddenRepeat.status,'failed');
 assert.match(forbiddenRepeat.error,/disappeared/);
+assert.match(forbiddenRepeat.reason,/disappeared/);
+assert.equal(forbiddenRepeat.retryable,false);
 const postedAtQuarantine=providerPost;
 const duplicate=await getPersistentTranscriptionJob(retryStart.jobToken);
 assert.equal(duplicate.status,'failed');

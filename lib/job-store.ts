@@ -10,6 +10,7 @@ import path from "node:path";
 import { extractYouTubeVideoId } from "./youtube";
 import {
   getGeminiTranscriptionJob,
+  normalizeTranscriptionJobResult,
   startGeminiTranscriptionJob,
   type TranscriptionJobResult,
 } from "./gemini-async";
@@ -214,7 +215,7 @@ async function storeResult(config:StoreConfig,id:string,owner:string,result:Tran
   if(!loaded || loaded.record.owner!==owner || !["starting","polling"].includes(loaded.record.phase)) {
     throw new Error("Durable transcription job ownership changed; result was not overwritten.");
   }
-  const phase:Phase=result.status==="completed"?"completed":result.status==="failed"?"failed":"active";
+  const phase:Phase=result.status==="completed"?"completed":["failed","cancelled","incomplete"].includes(result.status)?"failed":"active";
   const next:StoredJob={...loaded.record,phase,updatedAt:Date.now(),result};
   if(!await saveIfUnchanged(config,id,loaded.raw,next)) {
     const current=await load(config,id);
@@ -228,9 +229,7 @@ function toPublic(config:StoreConfig,id:string,record:StoredJob):TranscriptionJo
   if (record.result && record.phase!=="unknown") {
     // Hide the self-contained legacy token. Polling always resumes from the
     // latest durable state, not the caller's potentially stale response.
-    return {...record.result,jobToken:token,
-      ...(record.phase==="polling"?{status:"in_progress" as const}:{}),
-    };
+    return normalizeTranscriptionJobResult({...record.result,jobToken:token});
   }
   const base:TranscriptionJobResult=record.result ?? {
     status:"in_progress",jobToken:token,videoId:record.videoId,
@@ -240,11 +239,12 @@ function toPublic(config:StoreConfig,id:string,record:StoredJob):TranscriptionJo
     segments:[{startSeconds:0,endSeconds:null,modelIndex:0,model:"gemini-3.6-flash",attempts:0,status:"queued"}],
   };
   if (record.phase==="unknown" || record.phase==="failed") {
-    return {...base,status:"failed",jobToken:token,
-      error:record.error??base.error??"Transcription progress cannot safely be recovered; no duplicate Gemini POST was submitted.",
-      transcript:undefined,first30Lines:undefined,characterCount:undefined,lineCount:undefined};
+    const reason=record.error??base.error??"Transcription progress cannot safely be recovered; no duplicate Gemini POST was submitted.";
+    const failed=normalizeTranscriptionJobResult({...base,status:"failed",jobToken:token,
+      error:reason,transcript:undefined,first30Lines:undefined,characterCount:undefined,lineCount:undefined});
+    return {...failed,status:"failed",reason,error:reason,providerStatus:"unknown",retryable:false,shouldPoll:false,nextStatusCheckAt:undefined};
   }
-  return {...base,status:"in_progress",jobToken:token};
+  return normalizeTranscriptionJobResult({...base,status:"queued",jobToken:token});
 }
 async function readPublic(config:StoreConfig,id:string):Promise<TranscriptionJobResult> {
   let loaded=await load(config,id);
@@ -305,7 +305,7 @@ export async function getPersistentTranscriptionJob(jobToken:string,options?:{re
   const id=decodeToken(config,jobToken);
   const loaded=await load(config,id);
   if(!loaded) throw new Error("Durable transcription job missing or expired.");
-  if(loaded.record.phase!=="active" || !loaded.record.result || loaded.record.result.status!=="in_progress") {
+  if(loaded.record.phase!=="active" || !loaded.record.result || !["queued","in_progress","rate_limited","blocked","requires_action"].includes(loaded.record.result.status)) {
     return readPublic(config,id);
   }
   const owner=randomUUID();

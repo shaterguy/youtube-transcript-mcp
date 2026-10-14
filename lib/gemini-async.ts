@@ -23,7 +23,7 @@ const RETRY_DELAYS_MS = [1000, 3000, 7000];
 // A POST may have created a remote interaction even when its reply was lost.
 class AmbiguousSubmissionError extends Error {}
 
-export type JobStatus = "in_progress" | "completed" | "failed";
+export type JobStatus = "queued" | "in_progress" | "completed" | "failed" | "cancelled" | "incomplete" | "requires_action" | "rate_limited" | "blocked";
 export type SegmentState = {
   startSeconds: number;
   endSeconds: number | null;
@@ -80,6 +80,12 @@ export type TranscriptionJobResult = {
     cooldownSkipped?: boolean;
   }>;
   readWarning?: string;
+  // retryable means an explicit status GET can be retried, never permission for a new POST.
+  providerStatus?: string;
+  reason?: string;
+  retryable?: boolean;
+  shouldPoll?: boolean;
+  nextStatusCheckAt?: number;
   transcript?: string;
   characterCount?: number;
   lineCount?: number;
@@ -291,6 +297,7 @@ async function createInteraction(job: JobState, segment: SegmentState): Promise<
       throw new AmbiguousSubmissionError(`Gemini returned no valid interaction ID (${safeMessage(response.status)}).`);
     }
     segment.interactionId = response.id;
+    if (typeof response.status === "string") segment.lastProviderStatus = response.status;
     delete segment.submissionUnknown;
     delete segment.lastError;
   } catch (error) {
@@ -352,6 +359,52 @@ function createSegments(duration: number | null, chunkSeconds: number, hasPhysic
     attempts:0,
   }));
 }
+/** Project legacy stored results without changing provider identity or signed state. */
+export function normalizeTranscriptionJobResult(result: TranscriptionJobResult): TranscriptionJobResult {
+  const segments = result.segments.map(segment => {
+    let status = segment.status;
+    if (status === "failed" && ["cancelled", "incomplete"].includes(segment.lastProviderStatus ?? "")) {
+      status = segment.lastProviderStatus as JobStatus;
+    } else if (status !== "completed" && !["failed", "cancelled", "incomplete"].includes(status)) {
+      if (segment.lastReadError || segment.cooldownSkipped) {
+        status = segment.lastHttpStatus === 429 || /^HTTP 429:/.test(segment.lastReadError ?? segment.error ?? "")
+          ? "rate_limited" : "blocked";
+      } else if (["requires_action", "failed", "cancelled", "incomplete"].includes(segment.lastProviderStatus ?? "")) {
+        status = segment.lastProviderStatus as JobStatus;
+      } else if (status === "queued" && segment.error) {
+        status = "blocked";
+      }
+    }
+    return {...segment, status};
+  });
+  const priority: JobStatus[] = ["failed", "cancelled", "incomplete", "blocked", "rate_limited", "requires_action", "in_progress", "queued"];
+  const status: JobStatus = result.status === "failed" && !segments.some(s => ["cancelled", "incomplete"].includes(s.status)) ? "failed"
+    : segments.every(s => s.status === "completed") ? "completed"
+    : priority.find(value => segments.some(s => s.status === value)) ?? "blocked";
+  const shouldPoll = status === "in_progress" || status === "queued";
+  const interrupted = segments.filter(s => ["rate_limited", "blocked"].includes(s.status));
+  const retryable = status === "rate_limited" || (status === "blocked" && interrupted.length > 0 &&
+    interrupted.every(s => Boolean(s.lastReadError || s.cooldownSkipped) &&
+      (s.lastHttpStatus === undefined || isRetryableStatus(s.lastHttpStatus))));
+  const deadlines = interrupted.map(s => s.nextStatusCheckAt).filter((v): v is number => typeof v === "number");
+  const nextStatusCheckAt = retryable && deadlines.length ? Math.max(...deadlines) : undefined;
+  const providerStates = [...new Set(segments.map(s => s.lastReadError ? "unknown" : s.lastProviderStatus ??
+    (s.status === "completed" ? "completed" : "unknown")))];
+  const providerStatus = providerStates.length === 1 ? providerStates[0] : "mixed";
+  const detail = segments.filter(s => !["completed", "in_progress", "queued"].includes(s.status))
+    .map(s => s.lastReadError || s.error || `Provider status: ${s.lastProviderStatus ?? s.status}`).join(" | ");
+  const reason = status === "completed" ? "All transcript segments completed."
+    : shouldPoll ? `Provider status: ${status}.`
+    : detail || result.error || `Transcription status: ${status}.`;
+  const out = {...result, segments, status, providerStatus, reason, retryable, shouldPoll, nextStatusCheckAt};
+  if (!shouldPoll && status !== "completed") out.error = reason.slice(0, 1000);
+  else delete out.error;
+  if (status !== "completed") {
+    delete out.transcript; delete out.characterCount; delete out.lineCount; delete out.first30Lines;
+  }
+  return out;
+}
+
 function makeView(job: JobState, statuses: Array<JobStatus | "queued" | "requires_action">, texts?: string[]): TranscriptionJobResult {
   const total = job.segments.length;
   const completed = statuses.filter(x=>x==="completed").length;
@@ -390,7 +443,7 @@ function makeView(job: JobState, statuses: Array<JobStatus | "queued" | "require
     out.first30Lines=lines.slice(0,30);
   }
   if(status==="failed") out.error="One or more segments could not be transcribed; incomplete video text is not published as a full transcript.";
-  return out;
+  return normalizeTranscriptionJobResult(out);
 }
 
 export async function startGeminiTranscriptionJob(args: {
@@ -437,7 +490,9 @@ export async function startGeminiTranscriptionJob(args: {
   await Promise.all(Array.from({length:Math.min(MAX_SIMULTANEOUS_STARTS,job.segments.length)},async()=>{
     while(cursor<job.segments.length){const idx=cursor++;await createInteraction(job,job.segments[idx]);}
   }));
-  const statuses=job.segments.map(s=>s.interactionId?"in_progress" as const:s.submissionUnknown?"failed" as const:"queued" as const);
+  const statuses: JobStatus[]=job.segments.map(s=>s.interactionId
+    ? s.lastProviderStatus==="in_progress"?"in_progress":s.lastProviderStatus==="requires_action"?"requires_action":"queued"
+    : s.submissionUnknown?"failed":"queued");
   return makeView(job,statuses);
 }
 
@@ -538,14 +593,9 @@ export async function getGeminiTranscriptionJob(
         }else if(state==="failed"||state==="cancelled"||state==="incomplete"){
           const message=providerFailure(payload);
           segment.lastError=message;
-          if(!readOnly && segment.attempts<3 && isRetryableError(message)){
-            segment.modelIndex=Math.min(segment.modelIndex+1,MODELS.length-1);
-            segment.interactionId=null;
-            delete segment.read429Count;
-            delete segment.nextStatusCheckAt;
-            await retryPost(segment);
-            statuses[i]=segment.interactionId?"in_progress":segment.attempts<3?"queued":"failed";
-          } else statuses[i]="failed";
+          // A confirmed provider stop must be observable; status polling never hides it behind a new POST.
+          statuses[i]=state;
+
         }else {statuses[i]="failed";segment.lastError=`Unexpected interaction status: ${safeMessage(state)}`;}
       }catch(err){
         const message=safeMessage(err instanceof Error?err.message:err);
@@ -577,7 +627,10 @@ export async function getGeminiTranscriptionJob(
         }
         segment.lastError=message;
         // Other status-read timeouts likewise do not prove that the remote job failed.
-        statuses[i]="in_progress";
+        if (!isQuotaRead429 && (readError.httpStatus === undefined || isRetryableStatus(readError.httpStatus))) {
+          segment.nextStatusCheckAt = Date.now() + Math.max(30_000, readError.retryAfterMs ?? 0);
+        } else if (!isQuotaRead429) delete segment.nextStatusCheckAt;
+        statuses[i]=isQuotaRead429?"rate_limited":"blocked";
       }
     }
   }));

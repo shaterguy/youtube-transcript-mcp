@@ -65,7 +65,7 @@ try{
   const check=await getPersistentTranscriptionJob(checkJob.jobToken,{readOnly:true});
   assert.equal(postCount,postBeforeDiagnostic,"GET-only persisted read cannot POST");
   assert.equal(getCount,getBeforeDiagnostic+1);
-  assert.equal(check.status,"in_progress");
+  assert.equal(check.status,"requires_action");
   assert.equal(check.segments[0].status,"requires_action");
   assert.equal(check.segments[0].lastProviderStatus,"requires_action");
   assert.equal(check.segments[0].attempts,1);

@@ -1,6 +1,6 @@
 {
   "name": "youtube-transcript-mcp",
-  "version": "0.3.6-dev1",
+  "version": "0.3.6-dev2",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -8,7 +8,7 @@
     "start": "next start",
     "type-check": "tsc --noEmit",
     "test:async": "tsc --target ES2022 --module CommonJS --moduleResolution node --esModuleInterop --skipLibCheck --outDir test-output --rootDir lib lib/job-store.ts lib/gemini-async.ts lib/youtube.ts lib/gemini.ts && node test-async.mjs && node test-persistent.mjs",
-    "test:local": "npm run test:async && node test-local-persistent.mjs && node test-retry-backoff.mjs"
+    "test:local": "npm run test:async && node test-local-persistent.mjs && node test-retry-backoff.mjs && node test-job-status.mjs"
   },
   "dependencies": {
     "mcp-handler": "2.0.1",

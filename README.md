@@ -22,7 +22,7 @@ YouTube URL 입력에서는 Gemini Interactions API의 영상 클리핑 매개�
 
 구간을 나눌 때 기본 240초 간격이며 인접 구간은 3초 겹칩니다. 겹친 구간의 발화는 누락 방지를 위해 원문 그대로 보존하므로 일부 반복될 수 있습니다. 각 구간의 결과가 생성되었다는 사실만으로 발화의 정확성을 보증하지 않으며 실제 음성 내용과의 검증은 별도 작업입니다.
 
-Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오프로 재시도합니다. 완료되지 않은 Gemini 작업의 상태 조회에 429가 발생하면 안내된 재시도 시간을 지키고, 429가 반복되면 기존 Interactions ID를 보존하고 재조회합니다. 이미 전사를 완료한 구간은 서명된 상태 토큰에서 재사용하므로 다시 요청하지 않습니다. Gemini 백그라운드 작업이 일시적 오류로 실패한 경우에도 같은 모델로 필요한 구간만 재요청합니다. 토큰 서명 유효기간은 180일이며 Gemini가 보관하는 Interaction 기록은 별도로 만료될 수 있습니다. 토큰을 원본 서버의 최신 응답으로 갱신하여 사용하십시오. 비동기 작업은 Vercel 함수 메모리에 보관하지 않으므로 함수가 재시작되더라도 Google Interactions 측 작업 ID로 조회할 수 있습니다.
+Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오프로 재시도합니다. 완료되지 않은 Gemini 작업의 상태 조회에 429가 발생하면 안내된 재시도 시간을 지키고, 429가 반복되면 기존 Interactions ID를 보존하고 재조회합니다. 이미 전사를 완료한 구간은 서명된 상태 토큰에서 재사용하므로 다시 요청하지 않습니다. Gemini가 failed/cancelled/incomplete를 반환하면 그 상태를 그대로 보고하며 상태 조회가 새 전사 요청으로 바뀌지 않습니다. 토큰 서명 유효기간은 180일이며 Gemini가 보관하는 Interaction 기록은 별도로 만료될 수 있습니다. 토큰을 원본 서버의 최신 응답으로 갱신하여 사용하십시오. 비동기 작업은 Vercel 함수 메모리에 보관하지 않으므로 함수가 재시작되더라도 Google Interactions 측 작업 ID로 조회할 수 있습니다.
 
 ## 설정
 
@@ -46,3 +46,13 @@ Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오�
 - HTTP 429 is a status-read failure, not proof that the provider is still processing. Inspect `lastHttpStatus`, `lastReadError`, and `lastProviderStatus`; a failed latest read clears stale provider status.
 - Honor the full Retry-After minimum. Consecutive GET 429 adds exponential cooldown (30 seconds up to 30 minutes) plus nonnegative jitter; a longer provider minimum always wins. Successful GET resets the counter, and cooldown survives token/store restoration.
 - This change does not prove successful real transcription or resolve an external provider quota.
+
+
+
+## Explicit job status contract (v0.3.6-dev2)
+- Only confirmed processing/queue states use `in_progress`/`queued`. `shouldPoll=true` only for these states.
+- GET 429 returns `rate_limited`; other status-read failures return `blocked`. Both preserve the existing interaction and do not prove provider failure. `providerStatus=unknown` distinguishes a failed observation from actual provider state.
+- `requires_action`, `failed`, `cancelled`, and `incomplete` remain visible top-level states. Stop automatic waiting whenever `shouldPoll=false`; read `reason`/`error`.
+- `retryable` describes retrying the same status GET only. Respect `nextStatusCheckAt` and make an explicit retry decision; it is not permission to create another video transcription.
+- Legacy saved jobs are projected from persisted error/provider evidence without replacing their IDs, attempts, transcript cache, or cooldown. Transient blocked jobs remain explicitly resumable after service restart.
+- `readOnly:true` forbids all provider POSTs, including retries; it still saves status observations. No in-process timer polls jobs automatically.

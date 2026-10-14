@@ -93,23 +93,21 @@ queue=[reply({status:'completed',steps:[{type:'model_output',content:[]}]})];
 const empty=await getGeminiTranscriptionJob(one.jobToken);
 assert.equal(empty.status,'failed');assert.equal('transcript' in empty,false);
 
-// Provider-level 503 triggers a new background interaction and model fallback.
+// Confirmed provider failure stays visible and never silently starts a replacement.
 queue=[reply({id:'v1_recover1',status:'in_progress'})];
 const recover=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:100});
-queue=[reply({status:'failed',error:{code:503,message:'503 high demand'}}),reply({id:'v1_recover2',status:'in_progress'})];
+const beforeFailurePosts=calls.filter(x=>x.method==='POST').length;
+queue=[reply({status:'failed',error:{code:503,message:'503 high demand'}})];
 const retry=await getGeminiTranscriptionJob(recover.jobToken);
-assert.equal(retry.status,'in_progress');assert.equal(retry.segments[0].modelIndex,0);
-assert.notEqual(retry.jobToken,recover.jobToken);
-queue=[reply({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'[00:00:01] 화자: 성공'}]}]})];
-const ready=await getGeminiTranscriptionJob(retry.jobToken);
-assert.equal(ready.status,'completed');
+assert.equal(retry.status,'failed');assert.equal(retry.shouldPoll,false);
+assert.equal(calls.filter(x=>x.method==='POST').length,beforeFailurePosts);
 
 // Gemini may leave a background request queued during high demand. It is not a failure.
 queue=[reply({id:'v1_queued_interaction',status:'queued'})];
 const queuedJob=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 queue=[reply({status:'queued'})];
 const queuedCheck=await getGeminiTranscriptionJob(queuedJob.jobToken);
-assert.equal(queuedCheck.status,'in_progress');
+assert.equal(queuedCheck.status,'queued');
 assert.equal(queuedCheck.segments[0].status,'queued');
 assert.equal(queuedCheck.segments[0].modelIndex,0);
 
@@ -117,11 +115,11 @@ assert.equal(queuedCheck.segments[0].modelIndex,0);
 queue=[reply({id:'v1_internal1',status:'in_progress'})];
 const internal=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 queue=[
-  reply({status:'failed', errors:[{code:'INTERNAL',message:'There was a problem processing your request. You will not be charged.'}]}),
-  reply({id:'v1_internal2',status:'in_progress'})
+  reply({status:'failed', errors:[{code:'INTERNAL',message:'There was a problem processing your request. You will not be charged.'}]})
 ];
 const recoveredInternal=await getGeminiTranscriptionJob(internal.jobToken);
-assert.equal(recoveredInternal.status,'in_progress');
+assert.equal(recoveredInternal.status,'failed');
+assert.equal(recoveredInternal.shouldPoll,false);
 assert.equal(recoveredInternal.segments[0].modelIndex,0);
 assert.notEqual(recoveredInternal.jobToken,internal.jobToken);
 
@@ -131,7 +129,7 @@ const throttled=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSec
 const nBeforeRateGet=calls.length;
 queue=[reply({error:{message:'Rate limit exceeded. Retry later.'}},429,{'Retry-After':'7'})];
 const throttledPoll=await getGeminiTranscriptionJob(throttled.jobToken);
-assert.equal(throttledPoll.status,'in_progress');
+assert.equal(throttledPoll.status,'rate_limited');
 assert.equal(throttledPoll.segments[0].modelIndex,0);
 assert.equal(calls.length,nBeforeRateGet+1);
 assert.equal(throttledPoll.segments[0].lastHttpStatus,429);
@@ -161,7 +159,7 @@ queue=[reply({id:'v1_readonly_action',status:'in_progress'})];
 const roAction=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 queue=[reply({status:'requires_action',steps:[{type:'tool_call',content:[]}]})];
 const action=await getGeminiTranscriptionJob(roAction.jobToken,undefined,{readOnly:true});
-assert.equal(action.status,'in_progress');
+assert.equal(action.status,'requires_action');
 assert.equal(action.segments[0].status,'requires_action');
 assert.equal(action.segments[0].lastProviderStatus,'requires_action');
 assert.equal(calls.filter(c=>c.method==='POST').length,beforeReadOnlyPosts+1);
@@ -172,7 +170,7 @@ const transport503=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',duration
 const postsBefore503=calls.filter(c=>c.method==='POST').length;
 queue=Array.from({length:4},()=>reply({error:{message:'Provider overloaded'}},503,{'Retry-After':'0'}));
 const unavailable=await getGeminiTranscriptionJob(transport503.jobToken,undefined,{readOnly:true});
-assert.equal(unavailable.status,'in_progress');
+assert.equal(unavailable.status,'blocked');
 assert.equal(unavailable.segments[0].lastHttpStatus,503);
 assert.match(unavailable.readWarning,/HTTP 503/);
 assert.equal(unavailable.segments[0].attempts,1);
@@ -232,12 +230,12 @@ queue=[reply({id:'v1_get429_fallback_1',status:'in_progress'})];
 const stuck429=await startGeminiTranscriptionJob({url:'G-8cDsHLrD0',durationSeconds:60});
 queue=[reply({error:{message:'Rate limit exceeded. Please retry in 27s'}},429)];
 const quotaFirst=await getGeminiTranscriptionJob(stuck429.jobToken);
-assert.equal(quotaFirst.status,'in_progress');
+assert.equal(quotaFirst.status,'rate_limited');
 assert.equal(quotaFirst.segments[0].modelIndex,0);
 const beforeCooldownCall=calls.length;
 queue=[];
 const quotaCooling=await getGeminiTranscriptionJob(quotaFirst.jobToken);
-assert.equal(quotaCooling.status,'in_progress');
+assert.equal(quotaCooling.status,'rate_limited');
 assert.equal(calls.length,beforeCooldownCall, 'GET during Retry-After cooldown');
 const advanceNow=Date.now;
 let quotaSecond;
@@ -248,7 +246,7 @@ try{
   ];
   quotaSecond=await getGeminiTranscriptionJob(quotaCooling.jobToken);
 } finally {Date.now=advanceNow;}
-assert.equal(quotaSecond.status,'in_progress');
+assert.equal(quotaSecond.status,'rate_limited');
 assert.equal(quotaSecond.segments[0].modelIndex,0);
 assert.equal(quotaSecond.segments[0].attempts,1);
 assert.equal(calls.at(-1).method,'GET');
@@ -298,4 +296,4 @@ assert.equal(calls.length,beforeCaption);
 const restored=await getGeminiTranscriptionJob(captioned.jobToken);
 assert.equal(restored.transcript,captioned.transcript);
 
-console.log(JSON.stringify({status:'PASS',cases:['503 backoff','Gemini Files native time-window clips','all-segment assembly','signed token rejection','empty-result rejection','provider failed retry with one model','Gemini Files native clipping','queued background handling','INTERNAL provider retry','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 preserves active interaction','YouTube submitted once','async caption-first bypasses Gemini','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));
+console.log(JSON.stringify({status:'PASS',cases:['503 backoff','Gemini Files native time-window clips','all-segment assembly','signed token rejection','empty-result rejection','provider failed stays stopped without POST','Gemini Files native clipping','queued background handling','INTERNAL failure is visible','GET 429 non-hammering','POST 429 retry guidance','resume without re-fetching completed segments','persistent GET 429 preserves active interaction','YouTube submitted once','async caption-first bypasses Gemini','GET 429 cooldown','clear stale 429 errors'],completed_segments:completed.totalSegments,recovered_model:retry.segments[0].model},null,2));

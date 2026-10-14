@@ -90,7 +90,7 @@ const responseContractSchema = z.object({
 });
 
 const asyncJobOutputSchema = z.object({
-  status: z.enum(["in_progress", "completed", "failed"]),
+  status: z.enum(["queued", "in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "rate_limited", "blocked"]),
   jobToken: z.string(),
   videoId: z.string(),
   canonicalUrl: z.string(),
@@ -105,7 +105,7 @@ const asyncJobOutputSchema = z.object({
     modelIndex: z.number().int().nonnegative(),
     model: z.string(),
     attempts: z.number().int().nonnegative(),
-    status: z.enum(["queued", "in_progress", "requires_action", "completed", "failed"]),
+    status: z.enum(["queued", "in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "rate_limited", "blocked"]),
     error: z.string().optional(),
     lastReadError: z.string().optional(),
     lastProviderStatus: z.string().optional(),
@@ -116,6 +116,11 @@ const asyncJobOutputSchema = z.object({
     cooldownSkipped: z.boolean().optional(),
   })),
   readWarning: z.string().optional(),
+  providerStatus: z.string().optional(),
+  reason: z.string().optional(),
+  retryable: z.boolean().optional(),
+  shouldPoll: z.boolean().optional(),
+  nextStatusCheckAt: z.number().optional(),
   transcript: z.string().optional(),
   characterCount: z.number().int().nonnegative().optional(),
   lineCount: z.number().int().nonnegative().optional(),
@@ -162,11 +167,11 @@ const handler = createMcpHandler(
           "Use for long or timeout-prone YouTube videos. Starts Gemini Interactions API background jobs,",
           "returns a durable jobToken immediately and transcribes known-duration videos in overlapping time windows.",
           "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
-          "Optional Gemini Files API URI enables actual clipped media windows. Retries confirmed 429 or failed interactions, never replays an ambiguous POST.",
+          "Optional Gemini Files API URI enables actual clipped media windows. Initial POST throttling has bounded retries; confirmed provider stops are never silently resubmitted.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
           "be verified, the full video is submitted asynchronously as one job (segmentation=whole-video).",
-          "Always follow up by calling get_youtube_transcript_job with the latest returned jobToken",
-          "until status completed or failed. Never present a partial job as a complete video transcript.",
+          "Follow up with the latest jobToken only while shouldPoll=true. Stop automatic waiting on any blocked or terminal status.",
+          "Read reason/retryable/nextStatusCheckAt before explicitly retrying a status GET. Never present partial text as a complete transcript.",
         ].join(" "),
         inputSchema: {
           url: z.string().min(1).max(2048),
@@ -199,8 +204,9 @@ const handler = createMcpHandler(
       {
         title: "Poll background transcription job and assemble completed clips",
         description: [
-          "Poll Gemini server-side interaction status, automatically recover from transient 429/503",
-          "failures with backoff/model fallback, and combine clips only when ALL segments completed.",
+          "Read Gemini interaction status and combine clips only when ALL segments completed.",
+          "Stop automatic waiting when shouldPoll=false: rate_limited, blocked, requires_action, failed, cancelled or incomplete.",
+          "retryable only permits an explicit status GET after nextStatusCheckAt; it never authorizes another provider POST.",
           "Pass the durable jobToken on every poll; the store recovers the latest state across workers.",
           "Returns full transcript only if status=completed. Never infer completeness from partial progress.",
         ].join(" "),
