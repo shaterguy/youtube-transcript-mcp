@@ -51,6 +51,11 @@ export const responseContractSchema = z.object({
     additionalAnalysis: z.object({
       label: z.literal("[추가분석]"),
       required: z.literal(true),
+      analysisMode: z.literal("independent-deep-dive"),
+      substantiveDepthRequired: z.literal(true),
+      shortGenericAppendixForbidden: z.literal(true),
+      mayExceedContentLength: z.literal(true),
+      analyticalDimensions: z.array(z.string()),
       rule: z.string(),
     }),
   }),
