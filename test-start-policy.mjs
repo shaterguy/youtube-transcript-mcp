@@ -38,6 +38,14 @@ function checkPolicy(r){
   assert.equal(r.responseDirective,policy.YOUTUBE_FINAL_RESPONSE_DIRECTIVE);
   assert.deepEqual(r.responseContract,policy.YOUTUBE_RESPONSE_CONTRACT);
   assert.equal(r.responseContract.transcriptAcquisition.tool,'start_youtube_transcript_job');
+  const deep=r.responseContract.sections.additionalAnalysis;
+  assert.equal(deep.analysisMode,'independent-deep-dive');
+  assert.equal(deep.substantiveDepthRequired,true);
+  assert.equal(deep.shortGenericAppendixForbidden,true);
+  assert.equal(deep.mayExceedContentLength,true);
+  assert.ok(deep.analyticalDimensions.length>=5);
+  assert.match(deep.rule,/longer than the source-content reconstruction/);
+  assert.match(policy.YOUTUBE_SERVER_INSTRUCTIONS,/독립적인 심층 연구·논증 보고서/);
   assert.ok(Object.keys(r).indexOf('responseContract')<Object.keys(r).indexOf('transcript'));
   if(output.responseContractSchema)output.responseContractSchema.parse(r.responseContract);
 }
