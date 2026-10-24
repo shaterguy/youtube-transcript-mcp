@@ -1,10 +1,10 @@
-export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.5" as const;
+export const YOUTUBE_RESPONSE_POLICY_VERSION = "youtube-content-v1.2.6" as const;
 
 export const YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION =
   "Use this whenever the user provides a public YouTube URL or video ID and wants the video's content understood, organized, summarized, analyzed, or transcribed. A bare YouTube URL is sufficient reason to call this tool. Use start_youtube_transcript_job as the single entry for every video. It reuses cached transcripts or active jobs, then tries public captions and falls back to durable Gemini transcription within the same start. Use get_youtube_transcript_job for later results and follow its explicit status guidance. Do not call yt-dlp, metadata scrapers, or external transcript services to acquire source text. After the transcript is obtained, external research tools may be used only for fact-checking and additional analysis. Unless the user explicitly asks for raw transcript/captions only, the host LLM must assimilate the transcript into direct report prose rather than retell what a speaker said, and must follow this server's YouTube response instructions and the returned responseContract when composing the final answer.";
 
 export const YOUTUBE_FINAL_RESPONSE_DIRECTIVE =
-  "FINAL RESPONSE RULE: Assimilate the transcript into standalone report prose; do not retell what the speaker/video said, explained, claimed, mentioned, or discussed. Write the substantive propositions directly. Every YouTube timestamp must be a clickable Markdown link placed only AFTER the completed sentence or paragraph it supports, never before the content, in a heading, or on a standalone line. The MCP supplies transcript and rules only; the host LLM writes the actual report." as const;
+  "FINAL RESPONSE RULE: Assimilate the transcript into standalone report prose; do not retell what the speaker/video said, explained, claimed, mentioned, or discussed. Write the substantive propositions directly. Every YouTube timestamp must be a clickable Markdown link placed only AFTER the completed sentence or paragraph it supports, never before the content, in a heading, or on a standalone line. The [추가분석] section must be a substantive, independent research-style deep dive, not a short appendix. Develop relevant mechanisms, supporting evidence, comparisons, alternative explanations, scenarios, limitations, and implications in detail; its length may exceed [내용정리]. Avoid filler and unsupported claims. The MCP supplies transcript and rules only; the host LLM writes the actual report." as const;
 
 export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규칙 (${YOUTUBE_RESPONSE_POLICY_VERSION})
 
@@ -32,10 +32,14 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 - [개요]는 주제, 영상 길이처럼 확인 가능한 기본 정보, 관련 인물 등 개괄 정보만 제공한다. 핵심결론·핵심내용·한눈에 보기 등의 선요약을 두지 않는다.
 - [내용정리]에서는 반복되거나 흩어진 발언을 의미 단위로 통합하고, 발언 순서에 얽매이지 말고 주제와 논리 흐름에 맞게 재배열한다. 외부 자료·평가·반박·사실검증·확장 해석을 섞지 않는다.
 - [사실검증]에서는 원문의 명백하고 실질적인 오류만 바로잡는다. 사소한 표현 차이나 대략적인 방향이 맞는 내용은 넣지 않는다. 명백한 오류가 없으면 이 섹션을 생략한다.
-- [추가분석]은 [내용정리]와 [사실검증]까지 영상 내용 전달이 끝난 뒤, 영상에 없던 정보를 추가하여 사용자의 인사이트를 확장하는 별도 섹션이다.
-- [추가분석]에서는 이미 전달한 영상 내용을 다시 요약·정리하지 않으며, 원본 영상 자체에 대한 평가·리뷰·비평·감상·채점·품질판정을 하지 않는다. 영상의 구성·완성도·전달력 등 콘텐츠 자체를 평하는 내용도 금지한다. 다만 영상 속 개별 주장·사실을 외부 근거와 대조하는 사실검증과 배경 분석은 이 금지에 포함하지 않는다.
-- 대신 영상에 없던 관련 배경지식, 인접 개념, 비교 사례, 최신 연구·데이터, 파급효과, 새로운 연결관계, 추가로 생각해 볼 쟁점과 질문 등 실질적으로 새로운 정보를 제시한다.
-- 외부 자료를 활용할 수 있으며, [내용정리]의 반복이 아니라 원문 바깥으로 주제를 확장하는 데 사용한다.
+- [추가분석]은 [내용정리] 및 필요한 [사실검증]이 끝난 다음 진행하는 독립적인 심층 연구·논증 보고서이다. 단순한 후일담·보충설명·짧은 의견이나 요약의 부록으로 작성하지 않는다. 원문에서 출발하되 주제 자체를 독립적인 분석 대상으로 삼아, 영상에 없던 사실과 통찰을 새로 구축한다.
+- 깊이와 분량은 영상 길이나 [내용정리]의 분량이 아니라 분석할 쟁점의 중요도, 복잡성, 근거의 밀도에 따라 결정한다. 정해진 글자 수나 상한 비율을 두지 않는다. 필요하면 [추가분석]이 [내용정리]보다 길거나 영상 본문을 정리한 전체 내용보다 길어도 무방하다. 길다는 이유로 핵심 분석을 압축해 끝내지 않는다. 다만 실제 분석 가치가 낮은 단순 주제에 억지 분량을 채우지 않는다.
+- 복합적이고 분석 가치가 큰 주제에서는 가급적 서로 다른 핵심 질문 3∼6개를 선별하여 의미 있는 소제목과 복수 문단으로 충분히 발전시킨다. 숫자 충족을 위해 쟁점을 쪼개거나 서로 다른 소제목에서 같은 내용을 반복하지 않는다. 좁은 주제에서도 하나 이상의 핵심 질문을 깊이 있게 완결한다.
+- 각 핵심 질문에서는 '무엇이 문제인가 / 어떻게 작동하는가 / 무엇이 이를 뒷받침하는가 / 다른 설명은 무엇인가 / 어떤 결과가 예상되는가'를 주제에 맞게 구체적으로 논증한다. 현상·메커니즘·인과관계·제도 및 역사적 배경·정량적 근거·관련 비교 사례·반례·한계·파급효과·실무적 시사점·추적할 지표 중 의미 있는 차원을 실제 설명과 근거로 전개한다. 항목 명칭만 나열하거나 결론만 선언하지 않는다.
+- 주제가 허용하면 단기·중기·장기 시나리오, 상황별 전제조건과 전환 계기, 이해관계자별 득실, 1차·2차 파급효과, 반대 가설 및 가장 설득력 있는 반론을 평가한다. 단순히 가능성을 늘어놓지 말고 조건과 인과경로, 관측 지표를 구체화하며 근거에 비례한 판단을 내린다.
+- 필요하면 자막 확보 후 외부 자료를 조사한다. 중요한 수치·날짜·제도·연구·최신 동향에는 확인 가능한 신뢰성 높은 출처를 제시하고, 서로 충돌하는 근거는 차이를 설명한다. 사실·외부 연구·분석자의 추론·가정·예측을 구분한다. 검색 또는 검증이 불가능하면 확인되지 않은 최신 수치나 출처를 꾸며내지 않는다.
+- [내용정리]에서 이미 전달한 내용을 다시 요약·반복하지 않는다. 영상의 구성·완성도·전달력·제작 품질을 평가·리뷰·비평·채점하지 않는다. 다만 주제의 개별 명제에 대한 근거 비교, 다른 관점과의 논증, 배경지식 확장과 후속 연구는 허용한다.
+- 응답을 마치기 전에 각각의 중요 소주제가 고유한 새 통찰과 충분한 설명·근거·반론 또는 한계·함의를 포함하는지 확인한다. 주요 쟁점이 여럿 남았는데도 두세 문장의 포괄적 의견이나 피상적 제언으로 [추가분석]을 끝내지 않는다. 사용자가 명시적으로 간결한 답변을 요청하면 그 범위를 우선한다.
 
 5. 타임스탬프
 - 영상 콘텐츠를 정리할 때 주요 문장 또는 의미 단위에 실제 발언 위치와 대응하는 클릭 가능한 YouTube 타임스탬프를 붙인다.
@@ -47,6 +51,7 @@ export const YOUTUBE_SERVER_INSTRUCTIONS = `YouTube 콘텐츠 처리 전용 규�
 - 타임스탬프 링크를 코드 블록이나 인라인 코드로 감싸지 않는다.
 - transcript에 존재하거나 그 transcript로부터 신뢰성 있게 대응시킬 수 있는 실제 시각만 사용한다. 타임스탬프를 추정하거나 만들어내지 않는다.
 - 같은 의미 단위 안에서는 대표 시각 1개를 우선하며, 불필요하게 모든 문장에 타임스탬프를 반복하지 않는다.
+- [추가분석]의 독립적인 외부 근거나 새 추론에는 영상이 뒷받침하는 사실인 것처럼 영상 타임스탬프를 붙이지 않는다. 외부 자료와 별도로 확보한 사실은 해당 외부 출처로 뒷받침한다.
 
 6. 충돌 처리
 - 사용자가 이번 요청에서 더 구체적인 출력 형식이나 범위를 명시하면 그 요청을 우선한다.
@@ -109,7 +114,18 @@ export const YOUTUBE_RESPONSE_CONTRACT = {
     additionalAnalysis: {
       label: "[추가분석]",
       required: true,
-      rule: "Provide genuinely additive information that is not already contained in the transcript or source-content reconstruction. Use this section to broaden the user's insight with relevant external context, adjacent concepts, comparative cases, current research or data, implications, new connections, and further questions worth considering. Do not evaluate, review, critique, rate, grade, or assess the quality of the original video itself, including its production quality, completeness, structure, or delivery, and do not re-summarize or repeat its content. Fact-checking individual claims against external evidence and adding contextual analysis remain allowed; the source-content reconstruction is complete before this section.",
+      analysisMode: "independent-deep-dive",
+      substantiveDepthRequired: true,
+      shortGenericAppendixForbidden: true,
+      mayExceedContentLength: true,
+      analyticalDimensions: [
+        "Underlying mechanisms, causal chains, and historical or institutional context",
+        "Credible supporting evidence, quantitative data, and comparative cases",
+        "Competing explanations, counterarguments, uncertainty, and limits",
+        "Conditional scenarios, indirect consequences, and stakeholder effects",
+        "Practical or policy implications and observable indicators to monitor",
+      ],
+      rule: "Treat [추가분석] as a substantial standalone research-style deep dive rather than a short appendix. Explore multiple distinct, valuable analytical questions with developed subsections and paragraphs when the subject warrants it (typically 3–6 for complex subjects, never by artificial padding). For each question, explain the thesis, causal mechanism, corroborated evidence or comparisons, alternative explanations or limitations, and concrete implications or scenarios as relevant. Provide sufficiently detailed reasoning rather than a brief list of possibilities or generalities. There is no word-count cap or ratio to [내용정리]: additional analysis may be longer than the source-content reconstruction, even much longer when justified by evidentiary depth. Verify and cite material external facts and timely data; separate fact from inference and uncertainty, and never invent sources. Do not repeat or re-summarize the transcript, and do not evaluate the original video's production, structure, completeness, or delivery. Explicit user brevity requests or genuinely narrow subjects may warrant concise depth without filler.",
     },
   },
   timestamps: {
