@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
+const {sanitizeTranscriptResult:project}=require('./test-output/youtube-response-output.js');
+const completed={status:'completed',totalSegments:1,completedSegments:1,segments:[{status:'completed'}],transcript:'[00:00:01] Complete source proposition.'};
+const result=project(completed);
+assert.equal(result.status,'completed');
+assert.equal(result.transcript,completed.transcript);
+for(const field of ['responsePolicyVersion','responseDirective','responseContract']) assert.equal(result[field],undefined,field+' must be owned by the skill');
+const stale=project({...completed,responsePolicyVersion:'old',responseDirective:'old',responseContract:{old:true}});
+for(const field of ['responsePolicyVersion','responseDirective','responseContract']) assert.equal(stale[field],undefined);
+const partial=project({...completed,completedSegments:0});
+assert.equal(partial.status,'blocked');
+assert.equal(partial.transcript,undefined);
+console.log('PASS skill separation: complete transcript preserved, server policy omitted, stale policy stripped, partial completion blocked');

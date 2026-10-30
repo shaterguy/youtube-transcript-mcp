@@ -1,18 +1,16 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { isGeminiConfigured } from "../../lib/gemini";
-import { completedPolicyShape, withYouTubeResponsePolicy } from "../../lib/youtube-response-output";
+import { sanitizeTranscriptResult } from "../../lib/youtube-response-output";
 import { startPersistentTranscriptionJob, getPersistentTranscriptionJob, isDurableTranscriptStoreConfigured } from "../../lib/job-store";
 import {
-  YOUTUBE_RESPONSE_POLICY_VERSION,
   YOUTUBE_SERVER_INSTRUCTIONS,
   YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
-} from "../../lib/youtube-response-policy";
+} from "../../lib/youtube-transcript-instructions";
 
 export const maxDuration = 300;
 
 const asyncJobOutputSchema = z.object({
-  ...completedPolicyShape,
   cacheProvider: z.enum(["durable-local", "durable-redis"]).optional(),
   cacheVersion: z.literal("durable-v3").optional(),
   cacheCreatedAt: z.string().datetime().optional(),
@@ -63,7 +61,7 @@ const handler = createMcpHandler(
       {
         title: "Check MCP connection",
         description:
-          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback, transcript cache, and YouTube response policy are configured.",
+          "Use this when you need to verify that the YouTube transcript MCP server is reachable and whether the Gemini fallback and transcript cache are configured.",
         inputSchema: z.object({}),
         annotations: {
           readOnlyHint: true,
@@ -80,7 +78,7 @@ const handler = createMcpHandler(
               "YouTube Transcript MCP connection is working.",
               `Gemini fallback configured: ${isGeminiConfigured() ? "yes" : "no"}.`,
               `Transcript cache configured: ${isDurableTranscriptStoreConfigured() ? "yes" : "no"} (durable-v3, normalized video ID + language).`,
-              `YouTube response policy configured: yes (${YOUTUBE_RESPONSE_POLICY_VERSION}).`,
+              "Response composition: analyze-youtube-video skill (maintained independently of this server).",
             ].join("\n"),
           },
         ],
@@ -95,7 +93,6 @@ const handler = createMcpHandler(
           YOUTUBE_TRANSCRIPT_TOOL_DESCRIPTION,
           "A single start reuses complete cached transcripts or active jobs by normalized video ID and language, then tries yt-dlp captions, then Gemini background transcription if captions are unavailable.",
           "Returns completed caption/cache results directly, or a durable jobToken for later retrieval. There is no whole-job timeout; transport timeouts never cancel an accepted job.",
-          "Every verified completion carries the same responseDirective and responseContract before transcript, regardless of acquisition path.",
           "YouTube URL is submitted once for the entire video after public captions are checked; only Files API URIs support physical clipping.",
           "Optional Gemini Files API URI enables actual clipped media windows. Initial POST throttling has bounded retries; confirmed provider stops are never silently resubmitted.",
           "Pass durationSeconds if known. Otherwise YouTube metadata is checked; when duration cannot",
@@ -121,7 +118,7 @@ const handler = createMcpHandler(
       },
       async (args) => {
         try {
-          const result = withYouTubeResponsePolicy(await startPersistentTranscriptionJob(args));
+          const result = sanitizeTranscriptResult(await startPersistentTranscriptionJob(args));
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not start transcription job." }] };
@@ -155,7 +152,7 @@ const handler = createMcpHandler(
       },
       async ({ jobToken, readOnly }) => {
         try {
-          const result = withYouTubeResponsePolicy(await getPersistentTranscriptionJob(jobToken,{readOnly}));
+          const result = sanitizeTranscriptResult(await getPersistentTranscriptionJob(jobToken,{readOnly}));
           return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (error) {
           return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Could not poll transcription job." }] };

@@ -5,11 +5,10 @@ import {createHmac} from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 const require=createRequire(import.meta.url);
-const policy=require('./test-output/youtube-response-policy.js');
 let output;
 try { output=require('./test-output/youtube-response-output.js'); }
-catch(e) { if(e.code!=='MODULE_NOT_FOUND')throw e; output={withYouTubeResponsePolicy:r=>r}; }
-const wrap=output.withYouTubeResponsePolicy;
+catch(e) { if(e.code!=='MODULE_NOT_FOUND')throw e; output={sanitizeTranscriptResult:r=>r}; }
+const wrap=output.sanitizeTranscriptResult;
 const yt=require('./test-output/yt-dlp.js');
 const jobs=require('./test-output/job-store.js');
 const dir=await mkdtemp(path.join(os.tmpdir(),'yt-start-policy-'));
@@ -34,38 +33,29 @@ global.fetch=async(url,options={})=>{
 const failures=[];let cases=0;
 async function check(name,fn){cases++;try{await fn();console.log('PASS '+name);}catch(e){failures.push(name+': '+e.message);console.log('FAIL '+name+': '+e.message);}finally{process.env.YOUTUBE_TRANSCRIPT_JOB_DIR=dir;}}
 function checkPolicy(r){
-  assert.equal(r.status,'completed');assert.equal(r.responsePolicyVersion,policy.YOUTUBE_RESPONSE_POLICY_VERSION);
-  assert.equal(r.responseDirective,policy.YOUTUBE_FINAL_RESPONSE_DIRECTIVE);
-  assert.deepEqual(r.responseContract,policy.YOUTUBE_RESPONSE_CONTRACT);
-  assert.equal(r.responseContract.transcriptAcquisition.tool,'start_youtube_transcript_job');
-  const deep=r.responseContract.sections.additionalAnalysis;
-  assert.equal(deep.analysisMode,'independent-deep-dive');
-  assert.equal(deep.substantiveDepthRequired,true);
-  assert.equal(deep.shortGenericAppendixForbidden,true);
-  assert.equal(deep.mayExceedContentLength,true);
-  assert.ok(deep.analyticalDimensions.length>=5);
-  assert.match(deep.rule,/longer than the source-content reconstruction/);
-  assert.match(policy.YOUTUBE_SERVER_INSTRUCTIONS,/독립적인 심층 연구·논증 보고서/);
-  assert.ok(Object.keys(r).indexOf('responseContract')<Object.keys(r).indexOf('transcript'));
-  if(output.responseContractSchema)output.responseContractSchema.parse(r.responseContract);
+  assert.equal(r.status,'completed');
+  for (const field of ['responsePolicyVersion','responseDirective','responseContract']) assert.equal(r[field],undefined,field+' belongs to the separate skill');
+  assert.equal(typeof r.transcript,'string');
+  assert.ok(r.transcript.length>0);
 }
+
 try {
   await check('only check/start/get_job registration and shared wrapper',async()=>{
     const src=await readFile('app/mcp/route.ts','utf8');
     assert.deepEqual([...src.matchAll(/server\.registerTool\(\s*"([^"]+)"/g)].map(x=>x[1]),['check_connection','start_youtube_transcript_job','get_youtube_transcript_job']);
-    assert.equal((src.match(/withYouTubeResponsePolicy\(await /g)||[]).length,2);
+    assert.equal((src.match(/sanitizeTranscriptResult\(await /g)||[]).length,2);
     assert.ok(!src.includes('getCachedYouTubeTranscript'));
   });
   const args={url:'https://youtu.be/5k0tCrXdIIM',language:'en-US',durationSeconds:190};
   let immediate=await jobs.startPersistentTranscriptionJob(args);
-  await check('caption immediate completion has current complete policy; Gemini zero',async()=>{checkPolicy(wrap(immediate));assert.equal(providerPost,0);assert.equal(immediate.source,'yt-dlp');});
+  await check('caption immediate completion has verified source data; Gemini zero',async()=>{checkPolicy(wrap(immediate));assert.equal(providerPost,0);assert.equal(immediate.source,'yt-dlp');});
   await check('normalized video/language and changed hints reuse completion',async()=>{
     const before=captions;
     const cached=await jobs.startPersistentTranscriptionJob({...args,url:'https://www.youtube.com/watch?v=5k0tCrXdIIM&t=90',language:' EN-us ',durationSeconds:999,chunkSeconds:300});
     assert.equal(cached.jobToken,immediate.jobToken);assert.equal(captions,before);assert.equal(providerPost,0);
     assert.equal(cached.cacheKey,'5k0tCrXdIIM:en-us');checkPolicy(wrap(cached));
   });
-  await check('stored completed/restart applies current policy, not persisted stale policy',async()=>{
+  await check('stored completed/restart applies source data without persisted stale writing policy',async()=>{
     const name=(await readdir(dir)).find(n=>n.endsWith('.json'));
     const f=path.join(dir,name),record=JSON.parse(await readFile(f,'utf8'));
     record.result.responsePolicyVersion='stale';record.result.responseDirective='stale';record.result.responseContract={stale:true};
@@ -100,7 +90,7 @@ try {
     assert.equal(captions+providerPost+providerGet,before);
     process.env.YOUTUBE_TRANSCRIPT_JOB_DIR=dir;
   });
-  await check('noncomplete/error/empty/partial completion never receives success policy or text cache',async()=>{
+  await check('noncomplete/error/empty/partial completion never receives writing policy or text cache',async()=>{
     for(const status of ['queued','in_progress','failed','cancelled','incomplete','requires_action','rate_limited','blocked']){
       const r=wrap({...immediate,status,responseContract:{stale:true},responsePolicyVersion:'old',responseDirective:'old'});
       assert.equal(r.responseContract,undefined);assert.equal(r.transcript,undefined);assert.equal(r.cacheProvider,undefined);

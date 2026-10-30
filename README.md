@@ -57,9 +57,9 @@ Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오�
 - `readOnly:true` forbids all provider POSTs, including retries; it still saves status observations. No in-process timer polls jobs automatically.
 
 
-## Single start and current response policy (v0.3.6-dev3)
+## Single start and complete transcript delivery (v0.3.6-dev3)
 - Removed synchronous `get_youtube_transcript`; keep result lookup `get_youtube_transcript_job`.
-- Every verified complete result carries the same current responsePolicyVersion/responseDirective/responseContract before transcript, including immediate captions, Gemini completion, cache and legacy stored completion. Noncomplete/error results have no success policy or transcript cache metadata.
+- Every verified complete result delivers the full transcript, including immediate captions, Gemini completion, cache and legacy stored completion. Noncomplete/error results have no transcript cache metadata.
 - Content identity is video ID plus trimmed, lowercase language. Acquisition hints do not create duplicate jobs. Existing v2 signed tokens and stored provider IDs remain valid; legacy records are reused by their explicit video/language metadata.
 - Completed durable cache metadata uses `durable-v3`, `durable-local`/`durable-redis`. Local files retain their existing no-expiry behavior. Redis TTL remains 90 days from the latest persisted write; merely reading a completed record does not renew it. This retention is not an overall transcription deadline.
 - Legacy Next v3 fetch cache is preserved in the old release, not guessed into the new cache: its body does not record language and its key includes callback identity. Unknown-language entries are not automatically imported.
@@ -71,3 +71,8 @@ Google 429/503/5xx 및 일시적 네트워크 오류는 제한된 지수 백오�
 - Immediately before initial provider submission, CAS changes the stage to `starting`. Unknown POST outcomes retain the old no-replay quarantine. An old release's `starting` record is not retroactively assumed safe to retry.
 - Initial POST429 preserves `lastPostError`, HTTP status and Retry-After. Long Retry-After is returned rather than slept inside the request, and no missing-ID retry can run before cooldown. Existing accepted-ID GET recovery stays unchanged.
 - Legacy IDs are indexed once per process and matching records are reloaded. Deploy with old writers stopped. Unreadable unrelated legacy records are preserved and reported as degraded legacy deduplication evidence, not deleted or allowed to block unrelated new videos.
+
+## Writing policy separation (v0.3.6-dev4)
+- Report composition is maintained in the **analyze-youtube-video** skill and the [YouTube 영상 분석 plugin](https://chatgpt.com/plugins/plugins_6ae3fcf6b0b081919854a35e1dcb837f). Update that skill for writing-rule changes; no TMCP source change, build, or restart is needed.
+- The server provides acquisition, cache, durable job recovery, timed transcript data and technical status contracts only. Completed responses no longer carry responsePolicyVersion, responseDirective or responseContract; legacy cached copies of those fields are stripped at delivery time.
+- Existing signed tokens, job IDs, saved interactions, cache identity, cooldowns, retry rules and complete-transcript validation remain unchanged. The skill is responsible for composing the final report.
